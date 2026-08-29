@@ -54,6 +54,9 @@ needs to be insulated from that.
 | `lighthouse-ci.yml` | Node / web frontends | `lhci autorun` against a locally built app, plus a sticky PR comment with the score table; advisory by default |
 | `lockfile.yml` | Node / TypeScript | `workflow_dispatch` lockfile regeneration that proves the result before committing |
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
+| `claude-review.yml` | any | Claude posts inline line-level PR review comments -- the gap CodeRabbit's Free tier leaves |
+| `claude-address-feedback.yml` | any | Claude reads unresolved review threads (CodeRabbit + its own), fixes, resolves, pushes |
+| `auto-merge-gate.yml` | any | Enables/disables `gh pr merge --auto` per PR based on an opt-out label; merge timing itself comes from the org ruleset |
 
 Every job sets `timeout-minutes` and a least-privilege `permissions` block.
 Callers still need their own `permissions` block, because the caller's grant is
@@ -70,13 +73,85 @@ PR comment) saying so.
 Leaving them `false` forever is how a quality gate becomes decoration. Clear the
 backlog, flip the flag.
 
-`lighthouse-ci.yml` doesn't set its own performance/accessibility/SEO budgets —
+`lighthouse-ci.yml` doesn't set its own performance/accessibility/SEO budgets --
 those live in the consuming repo's own `lighthouserc.json` (or `.js`/`.cjs`),
 which `lhci autorun` discovers on its own. See `lighthouserc.example.json` in
 this repository for a starting point. A repo that wants "advisory on PRs,
 blocking on protected branches" rather than one fixed value can compute
 `strict` from the triggering event instead of hardcoding it:
 `strict: ${{ github.event_name != 'pull_request' }}`.
+
+The agent pipeline below (`claude-review`, `claude-address-feedback`,
+`auto-merge-gate`) deliberately does **not** follow this advisory-first
+pattern -- it went live org-wide from day one, at the account owner's
+explicit instruction, rather than proving itself on one repo first. Said
+here so the inconsistency with every other workflow in this file reads as a
+deliberate choice, not an oversight.
+
+## The agent pipeline
+
+`claude-review.yml`, `claude-address-feedback.yml`, and `auto-merge-gate.yml`
+together let a PR go from opened to merged with no human review, by default,
+org-wide:
+
+1. **Open a PR.** `claude-review.yml` posts inline comments; CodeRabbit
+   (installed separately at the org level, Free tier) posts its own summary
+   and merge-risk flag alongside it.
+2. **Feedback arrives.** `claude-address-feedback.yml` fires on CodeRabbit's
+   or Claude's comments, fixes what's real, resolves the thread, replies to
+   what it disputes, and pushes -- which re-triggers CI and step 1, and the
+   cycle repeats until nothing is left to flag.
+3. **`auto-merge-gate.yml`** enables `gh pr merge --auto` on the PR the
+   moment it's opened (unless it carries `needs-human-review`).
+4. **The org ruleset** -- required status checks green, and every review
+   conversation resolved -- is what actually lets GitHub complete the merge.
+   None of the three workflows above ever call merge themselves.
+
+Requires, at the organisation level (not reproducible by a workflow file,
+so done once by hand): the Claude GitHub App installed org-wide, an
+`ANTHROPIC_API_KEY` organisation Actions secret, the ruleset itself, and
+each repo's own "Allow auto-merge" setting turned on. See
+`claude/infrastructure-conventions.md` in the Tankster AI project for the
+full checklist and current status.
+
+A caller repo opts in with:
+
+```yaml
+# .github/workflows/agent-pipeline.yml in a consuming repo
+name: agent-pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: agent-pipeline-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: github.event_name == 'pull_request' && contains(fromJSON('["opened","synchronize","ready_for_review","reopened"]'), github.event.action)
+    uses: TanksterAI/.github/.github/workflows/claude-review.yml@v1
+    secrets:
+      anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  address-feedback:
+    if: github.event_name == 'pull_request_review' || github.event_name == 'issue_comment'
+    uses: TanksterAI/.github/.github/workflows/claude-address-feedback.yml@v1
+    secrets:
+      anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  auto-merge-gate:
+    if: github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","ready_for_review","labeled","unlabeled"]'), github.event.action)
+    uses: TanksterAI/.github/.github/workflows/auto-merge-gate.yml@v1
+```
 
 ## Security tooling, and what is deliberately absent
 
@@ -85,12 +160,12 @@ Security on private repositories, and most of this estate is private, so a
 CodeQL workflow would fail on the repos that need it most. What is here works on
 every repo at no cost:
 
-- **osv-scanner** — vulnerable dependencies across npm, PyPI, crates and Go.
+- **osv-scanner** -- vulnerable dependencies across npm, PyPI, crates and Go.
   Uses the `osv-scanner-action` sub-action, not the reusable workflow, because
   the reusable one uploads SARIF.
-- **gitleaks** — secrets, in CLI form. The gitleaks *Action* requires a licence
+- **gitleaks** -- secrets, in CLI form. The gitleaks *Action* requires a licence
   key for organisation-owned repositories; the MIT-licensed CLI does not.
-- **npm audit / pip-audit / cargo-audit** — ecosystem advisories.
+- **npm audit / pip-audit / cargo-audit** -- ecosystem advisories.
 
 Public repos can and should keep a CodeQL workflow of their own alongside this.
 
@@ -127,7 +202,7 @@ A change here lands on every consuming repo at once. Treat it accordingly:
 
 Reusable workflows in a **private** repository can only be called by other
 **private** repositories owned by the same account, and only once
-Settings → Actions → General → Access is set to allow it.
+Settings -> Actions -> General -> Access is set to allow it.
 
 A **public** repository has no such restriction and additionally makes
 `SECURITY.md`, `CONTRIBUTING.md` and the issue/PR templates here apply
