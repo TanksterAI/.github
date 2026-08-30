@@ -3,17 +3,44 @@
 # CodeRabbit is already installed org-wide, but its Free-tier cap (1 included
 # review/hour, walkthrough-only -- confirmed live on tankster-ai-public#3)
 # makes it unusable as the signal an auto-merge gate depends on. This runs
-# Claude itself as the line-level reviewer instead: billed as ordinary Claude
-# API usage against this org's own key, not a per-seat SaaS limit.
-# CodeRabbit's summary still posts and still gets read by
-# claude-address-feedback.yml -- this fills the gap it leaves, it does not
-# replace it.
+# Claude itself as the line-level reviewer instead. CodeRabbit's summary
+# still posts and still gets read by claude-address-feedback.yml -- this
+# fills the gap it leaves, it does not replace it.
 #
 # Runs the same `code-review` skill Anthropic's own hosted Code Review
-# product uses, through your own ANTHROPIC_API_KEY at ordinary API rates
-# instead of that product's $15-25/review managed price and its
-# Team/Enterprise-plan requirement. See https://code.claude.com/docs/en/code-review
-# and https://code.claude.com/docs/en/github-actions#run-a-skill.
+# product uses, instead of that product's $15-25/review managed price and
+# its Team/Enterprise-plan requirement. See
+# https://code.claude.com/docs/en/code-review and
+# https://code.claude.com/docs/en/github-actions#run-a-skill.
+#
+# Authentication -- accepts EITHER secret below; leave the one you're not
+# using unset on the org secrets page, never set both to different real
+# accounts' credentials at once:
+#   - claude-code-oauth-token: a Claude subscription OAuth token, minted by
+#     running `claude setup-token` (needs Pro/Max/Team/Enterprise, one-year
+#     expiry, does not auto-renew -- recheck before 29 Aug 2027). Rishi's
+#     explicit call, 29-30 Aug 2026: start here, on the Max plan already
+#     being paid for, and watch real usage before spending anything extra.
+#   - anthropic-api-key: a Console API key, metered separately from any
+#     subscription.
+# Both inputs are wired below so switching later is a secrets-page change
+# only, never a workflow edit: confirmed from Anthropic's own documented
+# credential precedence (code.claude.com/docs/en/authentication) that
+# ANTHROPIC_API_KEY outranks CLAUDE_CODE_OAUTH_TOKEN when both are present,
+# and that the API key always wins in the non-interactive mode this Action
+# runs in -- so adding anthropic-api-key later, without ever removing
+# claude-code-oauth-token, is enough to switch the whole org over.
+#
+# The real trade-off of starting on the OAuth token, confirmed from
+# Anthropic's own docs rather than assumed: it is ONE secret shared across
+# every repo in the org, but it draws down the personal, rate-limited
+# 5-hour/weekly quota of whoever ran `claude setup-token` -- the same pooled
+# quota as that person's own interactive Claude Code and Claude.ai usage
+# (support.claude.com: "all activity in both tools counts against the same
+# usage limits"). Anthropic's own setup docs recommend an API key
+# specifically for a secret shared across repositories, for this reason.
+# Watch Settings > Usage; if the pipeline's own traffic starts crowding out
+# interactive usage, add anthropic-api-key as the org secret.
 name: claude-review
 
 on:
@@ -24,7 +51,9 @@ on:
         default: 20
     secrets:
       anthropic-api-key:
-        required: true
+        required: false
+      claude-code-oauth-token:
+        required: false
 
 permissions:
   contents: read
@@ -48,6 +77,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.anthropic-api-key }}
+          claude_code_oauth_token: ${{ secrets.claude-code-oauth-token }}
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
           plugins: "code-review@claude-code-plugins"
           prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"

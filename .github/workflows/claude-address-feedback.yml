@@ -24,6 +24,14 @@
 # claude-code-action resolves the correct PR head itself. fetch-depth is 0
 # rather than their 1, because this job's prompt can be asked to merge or
 # rebase against a moved base, which needs history.
+#
+# Authentication: see claude-review.yml in this same directory for the full
+# reasoning -- accepts either secret, both wired through unconditionally so
+# a future switch is a secrets-page change only. This is the job most
+# exposed to the OAuth token's pooled-quota trade-off documented there: it
+# is the one with no iteration cap, per Rishi's explicit choice, so it's the
+# one most able to run up against a shared personal quota on a busy PR day.
+# Watch it first if usage is going to be watched at all.
 name: claude-address-feedback
 
 on:
@@ -40,7 +48,9 @@ on:
         default: 30
     secrets:
       anthropic-api-key:
-        required: true
+        required: false
+      claude-code-oauth-token:
+        required: false
 
 permissions:
   contents: read
@@ -71,6 +81,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.anthropic-api-key }}
+          claude_code_oauth_token: ${{ secrets.claude-code-oauth-token }}
           allowed_bots: ${{ inputs.allowed-bots }}
           prompt: |
             Read every unresolved review thread and unaddressed review comment
