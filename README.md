@@ -108,11 +108,22 @@ org-wide:
    None of the three workflows above ever call merge themselves.
 
 Requires, at the organisation level (not reproducible by a workflow file,
-so done once by hand): the Claude GitHub App installed org-wide, an
-`ANTHROPIC_API_KEY` organisation Actions secret, the ruleset itself, and
-each repo's own "Allow auto-merge" setting turned on. See
-`claude/infrastructure-conventions.md` in the Tankster AI project for the
-full checklist and current status.
+so done once by hand): the Claude GitHub App installed org-wide; **either**
+a `CLAUDE_CODE_OAUTH_TOKEN` organisation Actions secret (a Claude
+subscription token -- Pro/Max/Team/Enterprise -- minted locally with
+`claude setup-token`; one year, does not auto-renew) **or** an
+`ANTHROPIC_API_KEY` one (metered Console billing). Both `claude-review.yml`
+and `claude-address-feedback.yml` accept either as an optional secret and
+pass both through, and Anthropic's documented auth precedence has the API
+key always win when both are set -- so starting on the OAuth token and
+adding the API key later, without removing the token, is enough to switch
+the whole org over with no workflow edit. See the header comments in those
+two files for the full reasoning, including the trade-off of an OAuth
+secret shared across every repo pooling its rate limit with the token
+owner's own interactive usage. Also required regardless of which credential
+is used: the ruleset itself, and each repo's own "Allow auto-merge" setting
+turned on. See `claude/infrastructure-conventions.md` in the Tankster AI
+project for the full checklist and current status.
 
 A caller repo opts in with:
 
@@ -141,12 +152,14 @@ jobs:
     uses: TanksterAI/.github/.github/workflows/claude-review.yml@v1
     secrets:
       anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+      claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
   address-feedback:
     if: github.event_name == 'pull_request_review' || github.event_name == 'issue_comment'
     uses: TanksterAI/.github/.github/workflows/claude-address-feedback.yml@v1
     secrets:
       anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+      claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
   auto-merge-gate:
     if: github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","ready_for_review","labeled","unlabeled"]'), github.event.action)
