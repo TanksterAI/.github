@@ -1,3 +1,21 @@
+# ============================================================================
+# RETIRED 30 Aug 2026 -- no caller repo invokes this workflow any more.
+# CodeRabbit Pro is now the org's sole PR reviewer; the review-quality gap
+# that originally justified running Claude as a second reviewer (confirmed:
+# no linter/SAST signal reached it, no repo-wide context, no cross-review
+# memory) was closed by upgrading rather than by wiring CI lint/SAST output
+# into this skill in-house. Full comparison and the decision record:
+# claude/coderabbit-pro-verdict.md and infrastructure-conventions.md
+# ("Org-wide agent PR pipeline") in the Tankster AI project.
+#
+# Left in place, not deleted. claude-address-feedback.yml is unaffected --
+# it already reads and resolves CodeRabbit's review comments the same way
+# it read this workflow's. If CodeRabbit Pro's still-unconfirmed bot-seat
+# billing question (verdict doc, section 4) turns out to be a real problem
+# at scale, reviving this is just re-adding a `review:` job pointing at this
+# file to any consuming repo's agent-pipeline.yml -- no rebuild needed.
+# ============================================================================
+#
 # Reusable Claude line-level PR review.
 #
 # CodeRabbit is already installed org-wide, but its Free-tier cap (1 included
