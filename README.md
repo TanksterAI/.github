@@ -54,7 +54,7 @@ needs to be insulated from that.
 | `lighthouse-ci.yml` | Node / web frontends | `lhci autorun` against a locally built app, plus a sticky PR comment with the score table; advisory by default |
 | `lockfile.yml` | Node / TypeScript | `workflow_dispatch` lockfile regeneration that proves the result before committing |
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
-| `claude-review.yml` | any | Claude posts inline line-level PR review comments -- the gap CodeRabbit's Free tier leaves |
+| `claude-review.yml` | any | Claude posts inline line-level PR review comments -- **retired 30 Aug 2026**, no active callers; CodeRabbit Pro is now the org's sole PR reviewer (see "The agent pipeline" below). Kept in the repo, unused, in case that changes |
 | `claude-address-feedback.yml` | any | Claude reads unresolved review threads (CodeRabbit + its own), fixes, resolves, pushes |
 | `auto-merge-gate.yml` | any | Enables/disables `gh pr merge --auto` per PR based on an opt-out label; merge timing itself comes from the org ruleset |
 
@@ -81,49 +81,56 @@ blocking on protected branches" rather than one fixed value can compute
 `strict` from the triggering event instead of hardcoding it:
 `strict: ${{ github.event_name != 'pull_request' }}`.
 
-The agent pipeline below (`claude-review`, `claude-address-feedback`,
-`auto-merge-gate`) deliberately does **not** follow this advisory-first
-pattern -- it went live org-wide from day one, at the account owner's
-explicit instruction, rather than proving itself on one repo first. Said
-here so the inconsistency with every other workflow in this file reads as a
-deliberate choice, not an oversight.
+The agent pipeline below (`claude-address-feedback`, `auto-merge-gate`, and
+CodeRabbit Pro as the reviewer leg) deliberately does **not** follow this
+advisory-first pattern -- it went live org-wide from day one, at the account
+owner's explicit instruction, rather than proving itself on one repo first.
+Said here so the inconsistency with every other workflow in this file reads as
+a deliberate choice, not an oversight.
 
 ## The agent pipeline
 
-`claude-review.yml`, `claude-address-feedback.yml`, and `auto-merge-gate.yml`
-together let a PR go from opened to merged with no human review, by default,
-org-wide:
+`claude-address-feedback.yml` and `auto-merge-gate.yml`, together with
+CodeRabbit Pro as the org's PR reviewer (installed and licensed separately
+at the organisation level -- not a workflow in this repo), let a PR go from
+opened to merged with no human review, by default, org-wide:
 
-1. **Open a PR.** `claude-review.yml` posts inline comments; CodeRabbit
-   (installed separately at the org level, Free tier) posts its own summary
-   and merge-risk flag alongside it.
+1. **Open a PR.** CodeRabbit Pro posts its line-by-line review and
+   merge-risk summary. `claude-review.yml` used to also post inline
+   comments here; it was retired 30 Aug 2026 once CodeRabbit Pro closed a
+   confirmed gap in Claude's then-current review configuration (no
+   linter/SAST signal reached it, among other things) more cheaply than
+   building that wiring in-house would have. Full comparison in
+   `claude/coderabbit-pro-verdict.md`, Tankster AI project.
 2. **Feedback arrives.** `claude-address-feedback.yml` fires on CodeRabbit's
-   or Claude's comments, fixes what's real, resolves the thread, replies to
-   what it disputes, and pushes -- which re-triggers CI and step 1, and the
-   cycle repeats until nothing is left to flag.
+   comments, fixes what's real, resolves the thread, replies to what it
+   disputes, and pushes -- which re-triggers CI and a fresh CodeRabbit pass,
+   and the cycle repeats until nothing is left to flag.
 3. **`auto-merge-gate.yml`** enables `gh pr merge --auto` on the PR the
    moment it's opened (unless it carries `needs-human-review`).
 4. **The org ruleset** -- required status checks green, and every review
    conversation resolved -- is what actually lets GitHub complete the merge.
-   None of the three workflows above ever call merge themselves.
+   Neither workflow above ever calls merge itself.
 
 Requires, at the organisation level (not reproducible by a workflow file,
 so done once by hand): the Claude GitHub App installed org-wide; **either**
 a `CLAUDE_CODE_OAUTH_TOKEN` organisation Actions secret (a Claude
 subscription token -- Pro/Max/Team/Enterprise -- minted locally with
 `claude setup-token`; one year, does not auto-renew) **or** an
-`ANTHROPIC_API_KEY` one (metered Console billing). Both `claude-review.yml`
-and `claude-address-feedback.yml` accept either as an optional secret and
-pass both through, and Anthropic's documented auth precedence has the API
-key always win when both are set -- so starting on the OAuth token and
-adding the API key later, without removing the token, is enough to switch
-the whole org over with no workflow edit. See the header comments in those
-two files for the full reasoning, including the trade-off of an OAuth
-secret shared across every repo pooling its rate limit with the token
-owner's own interactive usage. Also required regardless of which credential
-is used: the ruleset itself, and each repo's own "Allow auto-merge" setting
-turned on. See `claude/infrastructure-conventions.md` in the Tankster AI
-project for the full checklist and current status.
+`ANTHROPIC_API_KEY` one (metered Console billing), for
+`claude-address-feedback.yml`; and a CodeRabbit Pro seat for the reviewer
+leg. `claude-address-feedback.yml` accepts either Claude credential as an
+optional secret and passes both through, and Anthropic's documented auth
+precedence has the API key always win when both are set -- so starting on
+the OAuth token and adding the API key later, without removing the token,
+is enough to switch the whole org over with no workflow edit. See the
+header comment in that file for the full reasoning, including the
+trade-off of an OAuth secret shared across every repo pooling its rate
+limit with the token owner's own interactive usage. Also required
+regardless of which credential is used: the ruleset itself, and each
+repo's own "Allow auto-merge" setting turned on. See
+`claude/infrastructure-conventions.md` in the Tankster AI project for the
+full checklist and current status.
 
 A caller repo opts in with:
 
@@ -133,7 +140,7 @@ name: agent-pipeline
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened, labeled, unlabeled]
+    types: [opened, ready_for_review, reopened, labeled, unlabeled]
   pull_request_review:
     types: [submitted]
   issue_comment:
@@ -147,13 +154,6 @@ permissions:
   contents: read
 
 jobs:
-  review:
-    if: github.event_name == 'pull_request' && contains(fromJSON('["opened","synchronize","ready_for_review","reopened"]'), github.event.action)
-    uses: TanksterAI/.github/.github/workflows/claude-review.yml@v1
-    secrets:
-      anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-      claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-
   address-feedback:
     if: github.event_name == 'pull_request_review' || github.event_name == 'issue_comment'
     uses: TanksterAI/.github/.github/workflows/claude-address-feedback.yml@v1
