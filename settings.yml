@@ -1,0 +1,42 @@
+# The org's repository policy, in one reviewable place.
+#
+# Applied to every non-archived repository by
+# .github/workflows/repo-settings-reconcile.yml -- nightly, and on demand.
+#
+# The shape here is deliberately the one github-community-projects/safe-settings
+# consumes. If this org ever outgrows sixty lines of bash, this file migrates
+# unchanged and only the runner is thrown away.
+
+repository:
+  # auto-merge-gate.yml runs `gh pr merge --auto --squash`. All three of these
+  # are load-bearing for that one command: without allow_auto_merge the API
+  # refuses with "Resource not accessible by integration", and without
+  # allow_squash_merge the --squash flag has nothing to select.
+  allow_auto_merge: true
+  allow_squash_merge: true
+
+  # Merged branches are junk, and GitHub will not clear them up on its own.
+  delete_branch_on_merge: true
+
+security:
+  # DETECTION. Renovate is this org's dependency updater, and its
+  # vulnerabilityAlerts block in default.json is enabled with
+  # prCreation: immediate -- but Renovate reads GitHub's vulnerability alerts
+  # to know what to fix. With this off on a repo, that entire security
+  # fast-path is inert and nothing says so.
+  dependabot_alerts: enabled
+
+  # REMEDIATION, and deliberately off. Renovate already opens these PRs
+  # immediately. Both enabled means two bots racing to fix the same CVE, and
+  # whichever loses leaves a stale branch behind. Renovate owns remediation;
+  # Dependabot owns detection. Written down so nobody enables it later meaning
+  # well.
+  dependabot_security_updates: disabled
+
+  # Reported, never written. Availability varies by plan and repository
+  # visibility, and a reconciler that fails on something it cannot control
+  # teaches people to ignore it.
+  secret_scanning: report_only
+
+# Version updates are deliberately absent, and no dependabot.yml is shipped:
+# that would duplicate Renovate outright and put two changelogs on every bump.
