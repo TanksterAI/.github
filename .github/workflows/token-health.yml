@@ -1,0 +1,91 @@
+# Tells you the credential is dying before it kills the reconciler.
+#
+# A fine-grained PAT expires. When it does, repo-settings-reconcile fails every
+# night and the org's repository policy quietly stops being enforced -- and
+# nothing about that is visible unless someone opens the Actions tab. This
+# estate has now been bitten four times by that exact shape: the agent pipeline
+# that never ran, the doctor check that checked nothing, Renovate's security
+# path resting on a disabled setting, and this.
+#
+# GitHub returns the credential's expiry in the
+# `github-authentication-token-expiration` response header, so the whole check
+# is one API call.
+#
+# A GitHub App installation token does not expire and does not send that
+# header. This treats a missing header as the healthy case, so migrating to an
+# App makes this pass permanently rather than making it something to delete.
+name: token-health
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check credential expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          WARN_DAYS: "14"
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::ORG_ADMIN_TOKEN is not set. Every org-wide job depends"
+            echo "::error::on it, so they are all currently doing nothing."
+            exit 1
+          fi
+
+          # -i to get headers. The endpoint is irrelevant; the header is the point.
+          expiry=$(gh api -i user 2>/dev/null \
+            | tr -d '\r' \
+            | grep -i '^github-authentication-token-expiration:' \
+            | cut -d' ' -f2- || true)
+
+          if [ -z "${expiry}" ]; then
+            echo "No expiry header returned."
+            echo "That is the good case: GitHub App installation tokens do not"
+            echo "expire and do not send this header. Nothing to do."
+            echo "### Credential health: no expiry" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          echo "Credential expires: ${expiry}"
+
+          # Header is like "2026-11-30 09:00:00 UTC". date -d copes with that.
+          if ! expiry_epoch=$(date -u -d "${expiry}" +%s 2>/dev/null); then
+            echo "::warning::could not parse expiry ${expiry@Q}; check it by hand"
+            exit 0
+          fi
+
+          now_epoch=$(date -u +%s)
+          days=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+          {
+            echo "### Credential health"
+            echo
+            echo "- expires: \`${expiry}\`"
+            echo "- days remaining: **${days}**"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${days}" -lt 0 ]; then
+            echo "::error::The credential expired ${days#-} days ago. Every org-wide"
+            echo "::error::job has been failing since, and repository policy is not"
+            echo "::error::being enforced."
+            exit 1
+          fi
+
+          if [ "${days}" -lt "${WARN_DAYS}" ]; then
+            echo "::error::Credential expires in ${days} days. Renew it, or migrate to"
+            echo "::error::a GitHub App installation token, which does not expire --"
+            echo "::error::see docs/github-app-migration.md."
+            exit 1
+          fi
+
+          echo "${days} days remaining; healthy."
