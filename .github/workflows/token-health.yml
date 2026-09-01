@@ -1,0 +1,99 @@
+# Warns before ORG_ADMIN_TOKEN expires, rather than after.
+#
+# repo-settings-reconcile.yml and branch-prune.yml both run on
+# ORG_ADMIN_TOKEN. A fine-grained PAT expires; when it does, the reconciler
+# fails on its first API call at 03:00, nobody is awake, and the estate drifts
+# silently until somebody notices twenty repositories disagreeing with
+# settings.yml. That failure is loud in the Actions tab and invisible
+# everywhere a person actually looks.
+#
+# THE MISSING HEADER IS THE HEALTHY CASE. GitHub returns
+# `github-authentication-token-expiration` for fine-grained PATs. A GitHub App
+# installation token does not carry it, because it does not expire in the
+# sense this check cares about. So this workflow passes permanently once the
+# org migrates to an App -- see docs/github-app-migration.md. It retires
+# itself rather than needing someone to remember to delete it.
+name: token-health
+
+on:
+  schedule:
+    # Early enough that a warning is read on the same working day.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check ORG_ADMIN_TOKEN expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          # Two weeks, so a warning survives a holiday.
+          MIN_DAYS: "14"
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::ORG_ADMIN_TOKEN is not set. repo-settings-reconcile"
+            echo "::error::and branch-prune cannot run without it."
+            exit 1
+          fi
+
+          # -i for headers. The body is discarded; only the header matters.
+          headers=$(gh api -i user 2>/dev/null | sed -n '1,/^\r*$/p')
+
+          expiry=$(echo "${headers}" \
+            | grep -i '^github-authentication-token-expiration:' \
+            | sed 's/^[^:]*: *//' | tr -d '\r' || true)
+
+          if [ -z "${expiry}" ]; then
+            echo "No expiration header returned."
+            echo "That is the GitHub App installation token case, and it is the"
+            echo "outcome this repository is aiming for. Nothing to do."
+            {
+              echo "### Token health"
+              echo
+              echo "No expiry header -- token does not expire. :white_check_mark:"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          echo "Expires: ${expiry}"
+
+          # The header is e.g. "2026-09-01 21:31:43 UTC". date -d handles it.
+          expiry_epoch=$(date -u -d "${expiry}" +%s 2>/dev/null || echo "")
+          if [ -z "${expiry_epoch}" ]; then
+            echo "::warning::Could not parse '${expiry}'. Check by hand."
+            exit 0
+          fi
+
+          now_epoch=$(date -u +%s)
+          days=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+          {
+            echo "### Token health"
+            echo
+            echo "- expires: \`${expiry}\`"
+            echo "- days remaining: **${days}**"
+            echo
+            echo "Stop needing this: [docs/github-app-migration.md](../blob/main/docs/github-app-migration.md)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${days}" -lt 0 ]; then
+            echo "::error::ORG_ADMIN_TOKEN EXPIRED ${days#-} days ago. The nightly"
+            echo "::error::reconciler has not been applying settings since then."
+            exit 1
+          fi
+
+          if [ "${days}" -lt "${MIN_DAYS}" ]; then
+            echo "::error::ORG_ADMIN_TOKEN expires in ${days} days. Rotate it, or"
+            echo "::error::migrate to a GitHub App and stop doing this forever:"
+            echo "::error::docs/github-app-migration.md"
+            exit 1
+          fi
+
+          echo "${days} days remaining. Healthy."
