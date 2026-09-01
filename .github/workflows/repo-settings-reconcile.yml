@@ -1,27 +1,25 @@
 # Org-wide repository settings, reconciled.
 #
-# GitHub has no org-level default for `allow_auto_merge`. It is a
-# per-repository setting; there is no repository-defaults entry for it, and org
-# rulesets govern merge *requirements* rather than whether the auto-merge
-# mechanism exists. So without something like this, every new repo starts with
-# it off and nobody notices until a pipeline fails on it.
+# The policy lives in ../../settings.yml, not here. This file is only the
+# runner. That split is on purpose: the policy is a document people argue
+# with, and it belongs somewhere reviewable rather than inside a heredoc.
 #
-# That is not hypothetical: agent-os ran a pipeline whose auto-merge step
-# failed with `Resource not accessible by integration (mergePullRequest)`
-# purely because this box was unticked on that one repo.
+# WHY THIS EXISTS. GitHub has no org-level default for `allow_auto_merge`.
+# There is no repository-defaults entry for it, and org rulesets govern merge
+# *requirements* rather than whether the mechanism exists. So without this,
+# every new repo starts with it off and nobody notices until something breaks
+# on it -- which is exactly how agent-os ran a pipeline whose auto-merge step
+# failed with `Resource not accessible by integration (mergePullRequest)`.
 #
-# DESIRED below is the entire policy. Edit it here, not in twenty settings
-# pages.
+# WHAT IS NATIVE INSTEAD. Dependabot alerts *do* have an org-level control:
+# Organization Settings -> Code security. Set them there as the primary
+# mechanism; this job then verifies rather than assumes, which is the whole
+# lesson of the three settings-shaped defects this estate has already hit.
 #
-# TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot write
-# settings on others, so this needs `ORG_ADMIN_TOKEN` -- a fine-grained PAT or
-# GitHub App installation token with Administration: write on the org's
-# repositories. One secret, once, instead of a click per repo forever.
-#
-# Alternative worth knowing: github-community-projects/safe-settings does this
-# and considerably more, continuously, as a hosted app. It is the better answer
-# at a larger scale. This is ~60 lines with no app to run, which is the better
-# answer at this one.
+# TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot
+# write settings on others, so this needs `ORG_ADMIN_TOKEN` -- a fine-grained
+# PAT or App installation token with Administration: write and
+# Vulnerability alerts: write on the org's repositories.
 name: repo-settings-reconcile
 
 on:
@@ -39,16 +37,18 @@ permissions: {}
 
 jobs:
   reconcile:
-    name: Reconcile merge settings
+    name: Reconcile repository policy
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v7.0.1
+
       - name: Reconcile
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
           ORG: ${{ github.repository_owner }}
-          # Scheduled runs apply. A hand-run defaults to reporting only, so
-          # nobody discovers the blast radius by causing it.
+          # Scheduled runs apply. A hand-run reports only, so nobody discovers
+          # the blast radius by causing it.
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
         run: |
           set -euo pipefail
@@ -60,16 +60,19 @@ jobs:
             exit 1
           fi
 
-          # The whole policy. Every key here is enforced; anything absent is
-          # left alone deliberately, so this never fights a per-repo choice it
-          # was not asked to have an opinion about.
-          DESIRED='{
-            "allow_auto_merge": true,
-            "allow_squash_merge": true,
-            "delete_branch_on_merge": true
-          }'
+          POLICY=settings.yml
+          [ -f "${POLICY}" ] || { echo "::error::${POLICY} is missing"; exit 1; }
+
+          # yq ships on ubuntu-latest. Fail loudly rather than silently skipping.
+          command -v yq >/dev/null || { echo "::error::yq not found on runner"; exit 1; }
+
+          DESIRED=$(yq -o=json '.repository' "${POLICY}")
+          WANT_ALERTS=$(yq -r '.security.dependabot_alerts // "unset"' "${POLICY}")
+          WANT_FIXES=$(yq -r '.security.dependabot_security_updates // "unset"' "${POLICY}")
 
           echo "Reconciling ${ORG} (dry-run: ${DRY_RUN})"
+          echo "policy: $(echo "${DESIRED}" | jq -c .)"
+          echo "dependabot alerts: ${WANT_ALERTS} | security updates: ${WANT_FIXES}"
           echo
 
           repos=$(gh api --paginate "orgs/${ORG}/repos?type=all&per_page=100" \
@@ -85,49 +88,93 @@ jobs:
 
           total=0; changed=0; failed=0
 
+          # $1 verb, $2 path, $3 label. Warns rather than stopping: one repo
+          # refusing a write must not hide the other nineteen.
+          apply() {
+            if [ "${DRY_RUN}" = "true" ]; then return 0; fi
+            if gh api -X "$1" "$2" --silent 2>/dev/null; then
+              echo "  applied   $3"
+            else
+              echo "::warning::could not $3 on $2"
+              failed=$((failed + 1))
+            fi
+          }
+
           while IFS= read -r repo; do
             total=$((total + 1))
-            current=$(gh api "repos/${repo}" --jq \
-              '{allow_auto_merge, allow_squash_merge, delete_branch_on_merge}')
+            note=""
 
-            # Only the keys that actually differ. A full-object PATCH is how the
+            # --- merge settings -------------------------------------------
+            keys=$(echo "${DESIRED}" | jq -r 'keys | join(",")')
+            current=$(gh api "repos/${repo}" --jq "{$(echo "${keys}" | tr ',' '\n' | sed 's/.*/&/' | paste -sd, -)}")
+
+            # Only the keys that differ. A full-object PATCH is how the
             # documented "updating a repository through the API disables
             # auto-merge" foot-gun happens: omitted fields get reset.
             diff=$(jq -n --argjson cur "${current}" --argjson want "${DESIRED}" \
               '$want | with_entries(select(.value != $cur[.key]))')
 
-            if [ "${diff}" = "{}" ]; then
+            if [ "${diff}" != "{}" ]; then
+              note="merge:$(echo "${diff}" | jq -c .)"
+              if [ "${DRY_RUN}" != "true" ]; then
+                if echo "${diff}" | gh api -X PATCH "repos/${repo}" --input - >/dev/null 2>&1; then
+                  :
+                else
+                  echo "::warning::could not patch merge settings on ${repo}"
+                  failed=$((failed + 1))
+                fi
+              fi
+            fi
+
+            # --- dependabot alerts (detection) ----------------------------
+            # Renovate's vulnerabilityAlerts fast-path reads these. Off means
+            # that whole path is inert and silent.
+            if [ "${WANT_ALERTS}" = "enabled" ]; then
+              if gh api "repos/${repo}/vulnerability-alerts" --silent 2>/dev/null; then
+                :
+              else
+                note="${note} alerts:off"
+                apply PUT "repos/${repo}/vulnerability-alerts" "enable dependabot alerts"
+              fi
+            fi
+
+            # --- dependabot security updates (remediation) ----------------
+            # Renovate owns this. Two bots racing on one CVE leaves a stale
+            # branch behind whichever loses.
+            if [ "${WANT_FIXES}" = "disabled" ]; then
+              state=$(gh api "repos/${repo}" \
+                --jq '.security_and_analysis.dependabot_security_updates.status // "unknown"' 2>/dev/null || echo unknown)
+              if [ "${state}" = "enabled" ]; then
+                note="${note} securityupdates:on(renovate-owns-this)"
+                apply DELETE "repos/${repo}/automated-security-fixes" "disable dependabot security updates"
+              fi
+            fi
+
+            # --- secret scanning: reported, never written -----------------
+            ss=$(gh api "repos/${repo}" \
+              --jq '.security_and_analysis.secret_scanning.status // "unavailable"' 2>/dev/null || echo unavailable)
+            [ "${ss}" = "enabled" ] || note="${note} secretscanning:${ss}"
+
+            if [ -z "${note}" ]; then
               echo "ok        ${repo}"
-              continue
-            fi
-
-            changed=$((changed + 1))
-            echo "drift     ${repo}: $(echo "${diff}" | jq -c .)"
-
-            if [ "${DRY_RUN}" = "true" ]; then
-              continue
-            fi
-
-            if echo "${diff}" | gh api -X PATCH "repos/${repo}" --input - > /dev/null; then
-              echo "applied   ${repo}"
             else
-              # One repo refusing must not hide the rest. Common cause is the
-              # token lacking admin on that repository specifically.
-              echo "::warning::could not update ${repo}; continuing"
-              failed=$((failed + 1))
+              changed=$((changed + 1))
+              echo "drift     ${repo}: ${note}"
             fi
           done <<< "${repos}"
 
           echo
-          echo "${total} repositories, ${changed} needed changes, ${failed} could not be written"
+          echo "${total} repositories, ${changed} drifted, ${failed} could not be written"
           {
-            echo "### Repository settings reconcile"
+            echo "### Repository policy reconcile"
             echo
             echo "- org: \`${ORG}\`"
             echo "- dry run: \`${DRY_RUN}\`"
             echo "- repositories: ${total}"
             echo "- drifted: ${changed}"
             echo "- failed to write: ${failed}"
+            echo
+            echo "Policy source: \`settings.yml\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
           # A run that could not write what it found is not a success.
