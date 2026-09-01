@@ -16,6 +16,8 @@ repository:
   allow_squash_merge: true
 
   # Merged branches are junk, and GitHub will not clear them up on its own.
+  # Forward-looking only -- see maintenance.prune_merged_branches below for
+  # what was left behind before this landed.
   delete_branch_on_merge: true
 
 security:
@@ -37,6 +39,16 @@ security:
   # visibility, and a reconciler that fails on something it cannot control
   # teaches people to ignore it.
   secret_scanning: report_only
+
+maintenance:
+  # Sweeps branches whose PR was merged before delete_branch_on_merge landed.
+  # Narrow on purpose: merged PR only, never the default branch, never a
+  # protected branch, and never one with another open PR pointing at it. The
+  # commits already live in the base branch, so this removes a pointer, not
+  # work.
+  #
+  # Off by default. Turn it on deliberately, and watch one dry run first.
+  prune_merged_branches: false
 
 # Version updates are deliberately absent, and no dependabot.yml is shipped:
 # that would duplicate Renovate outright and put two changelogs on every bump.
