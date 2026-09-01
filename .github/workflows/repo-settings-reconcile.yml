@@ -1,0 +1,136 @@
+# Org-wide repository settings, reconciled.
+#
+# GitHub has no org-level default for `allow_auto_merge`. It is a
+# per-repository setting; there is no repository-defaults entry for it, and org
+# rulesets govern merge *requirements* rather than whether the auto-merge
+# mechanism exists. So without something like this, every new repo starts with
+# it off and nobody notices until a pipeline fails on it.
+#
+# That is not hypothetical: agent-os ran a pipeline whose auto-merge step
+# failed with `Resource not accessible by integration (mergePullRequest)`
+# purely because this box was unticked on that one repo.
+#
+# DESIRED below is the entire policy. Edit it here, not in twenty settings
+# pages.
+#
+# TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot write
+# settings on others, so this needs `ORG_ADMIN_TOKEN` -- a fine-grained PAT or
+# GitHub App installation token with Administration: write on the org's
+# repositories. One secret, once, instead of a click per repo forever.
+#
+# Alternative worth knowing: github-community-projects/safe-settings does this
+# and considerably more, continuously, as a hosted app. It is the better answer
+# at a larger scale. This is ~60 lines with no app to run, which is the better
+# answer at this one.
+name: repo-settings-reconcile
+
+on:
+  schedule:
+    # 04:00 UTC daily. Applies.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Report the diff without writing anything.
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  reconcile:
+    name: Reconcile merge settings
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Reconcile
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          # Scheduled runs apply. A hand-run defaults to reporting only, so
+          # nobody discovers the blast radius by causing it.
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::ORG_ADMIN_TOKEN is not set. The default GITHUB_TOKEN cannot"
+            echo "::error::write settings on other repositories, so this job would"
+            echo "::error::report success having changed nothing."
+            exit 1
+          fi
+
+          # The whole policy. Every key here is enforced; anything absent is
+          # left alone deliberately, so this never fights a per-repo choice it
+          # was not asked to have an opinion about.
+          DESIRED='{
+            "allow_auto_merge": true,
+            "allow_squash_merge": true,
+            "delete_branch_on_merge": true
+          }'
+
+          echo "Reconciling ${ORG} (dry-run: ${DRY_RUN})"
+          echo
+
+          repos=$(gh api --paginate "orgs/${ORG}/repos?type=all&per_page=100" \
+            --jq '.[] | select(.archived == false) | .full_name')
+
+          if [ -z "${repos}" ]; then
+            echo "::error::No repositories returned. Either the org is empty or the"
+            echo "::error::token cannot see it. Refusing to report success over an"
+            echo "::error::empty list -- a reconciler that converges on nothing looks"
+            echo "::error::exactly like one that is working."
+            exit 1
+          fi
+
+          total=0; changed=0; failed=0
+
+          while IFS= read -r repo; do
+            total=$((total + 1))
+            current=$(gh api "repos/${repo}" --jq \
+              '{allow_auto_merge, allow_squash_merge, delete_branch_on_merge}')
+
+            # Only the keys that actually differ. A full-object PATCH is how the
+            # documented "updating a repository through the API disables
+            # auto-merge" foot-gun happens: omitted fields get reset.
+            diff=$(jq -n --argjson cur "${current}" --argjson want "${DESIRED}" \
+              '$want | with_entries(select(.value != $cur[.key]))')
+
+            if [ "${diff}" = "{}" ]; then
+              echo "ok        ${repo}"
+              continue
+            fi
+
+            changed=$((changed + 1))
+            echo "drift     ${repo}: $(echo "${diff}" | jq -c .)"
+
+            if [ "${DRY_RUN}" = "true" ]; then
+              continue
+            fi
+
+            if echo "${diff}" | gh api -X PATCH "repos/${repo}" --input - > /dev/null; then
+              echo "applied   ${repo}"
+            else
+              # One repo refusing must not hide the rest. Common cause is the
+              # token lacking admin on that repository specifically.
+              echo "::warning::could not update ${repo}; continuing"
+              failed=$((failed + 1))
+            fi
+          done <<< "${repos}"
+
+          echo
+          echo "${total} repositories, ${changed} needed changes, ${failed} could not be written"
+          {
+            echo "### Repository settings reconcile"
+            echo
+            echo "- org: \`${ORG}\`"
+            echo "- dry run: \`${DRY_RUN}\`"
+            echo "- repositories: ${total}"
+            echo "- drifted: ${changed}"
+            echo "- failed to write: ${failed}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          # A run that could not write what it found is not a success.
+          if [ "${failed}" -gt 0 ] && [ "${DRY_RUN}" != "true" ]; then
+            exit 1
+          fi
