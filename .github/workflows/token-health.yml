@@ -13,6 +13,13 @@
 # sense this check cares about. So this workflow passes permanently once the
 # org migrates to an App -- see docs/github-app-migration.md. It retires
 # itself rather than needing someone to remember to delete it.
+#
+# ...but ONLY when the API call actually succeeded. See the guard below. The
+# first version of this file read `gh api -i user 2>/dev/null` and treated an
+# empty result as the App case, which is exactly inverted: a REVOKED token is
+# the likeliest reason for an empty result, and it was reported with a white
+# tick. A check that lies in the direction of health is worse than no check.
+# Fixed 2026-09-02.
 name: token-health
 
 on:
@@ -43,21 +50,37 @@ jobs:
             exit 1
           fi
 
-          # -i for headers. The body is discarded; only the header matters.
-          headers=$(gh api -i user 2>/dev/null | sed -n '1,/^\r*$/p')
+          # THE CALL MUST SUCCEED BEFORE ITS SILENCE MEANS ANYTHING.
+          # stderr is left attached on purpose so a failure is readable in the
+          # log rather than swallowed by 2>/dev/null.
+          if ! response=$(gh api -i user); then
+            echo "::error::gh api user failed. ORG_ADMIN_TOKEN is most likely"
+            echo "::error::revoked, expired, or lacking scope. This is NOT the"
+            echo "::error::missing-header case and must never be read as one."
+            exit 1
+          fi
 
-          expiry=$(echo "${headers}" \
+          # A non-2xx that gh did not surface as an error still must not pass.
+          if ! printf '%s' "${response}" | head -1 | grep -qE '^HTTP/[0-9.]+ 2[0-9][0-9]'; then
+            echo "::error::Unexpected status from gh api user:"
+            printf '%s' "${response}" | head -1
+            exit 1
+          fi
+
+          headers=$(printf '%s' "${response}" | sed -n '1,/^\r*$/p')
+
+          expiry=$(printf '%s' "${headers}" \
             | grep -i '^github-authentication-token-expiration:' \
             | sed 's/^[^:]*: *//' | tr -d '\r' || true)
 
           if [ -z "${expiry}" ]; then
-            echo "No expiration header returned."
+            echo "Call succeeded, and no expiration header was returned."
             echo "That is the GitHub App installation token case, and it is the"
             echo "outcome this repository is aiming for. Nothing to do."
             {
               echo "### Token health"
               echo
-              echo "No expiry header -- token does not expire. :white_check_mark:"
+              echo "Call succeeded; no expiry header -- token does not expire. :white_check_mark:"
             } >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
@@ -67,8 +90,13 @@ jobs:
           # The header is e.g. "2026-09-01 21:31:43 UTC". date -d handles it.
           expiry_epoch=$(date -u -d "${expiry}" +%s 2>/dev/null || echo "")
           if [ -z "${expiry_epoch}" ]; then
-            echo "::warning::Could not parse '${expiry}'. Check by hand."
-            exit 0
+            # Failing, not warning. A check that cannot read its own input has
+            # verified nothing, and passing here would quietly degrade this
+            # into a permanently green job the day the header format changes.
+            echo "::error::Could not parse expiry '${expiry}'. The header format"
+            echo "::error::may have changed. Refusing to report health from an"
+            echo "::error::input this job could not read."
+            exit 1
           fi
 
           now_epoch=$(date -u +%s)
