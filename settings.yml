@@ -1,7 +1,8 @@
 # The org's repository policy, in one reviewable place.
 #
 # Applied to every non-archived repository by
-# .github/workflows/repo-settings-reconcile.yml -- nightly, and on demand.
+# .github/workflows/repo-settings-reconcile.yml -- on a push to this file,
+# nightly, and on demand.
 #
 # The shape here is deliberately the one github-community-projects/safe-settings
 # consumes. If this org ever outgrows sixty lines of bash, this file migrates
@@ -12,12 +13,25 @@ repository:
   # are load-bearing for that one command: without allow_auto_merge the API
   # refuses with "Resource not accessible by integration", and without
   # allow_squash_merge the --squash flag has nothing to select.
+  #
+  # BLOCKED BY THE PLAN, measured 2026-09-02. GitHub accepts a PATCH setting
+  # allow_auto_merge, returns success, and silently discards it on a private
+  # repository below Pro: "Auto-merge for pull requests is available in public
+  # repositories with GitHub Free and GitHub Free for organizations, and in
+  # public and private repositories with GitHub Pro, GitHub Team, GitHub
+  # Enterprise Cloud, and GitHub Enterprise Server." All twenty repositories
+  # here are private on Free, so this key cannot be applied by any token and
+  # the reconciler reports it as NOT-APPLIED rather than pretending.
+  #
+  # It stays declared on purpose. This file is the statement of intent, and
+  # the day the org moves plan the next run applies it with no edit needed.
   allow_auto_merge: true
   allow_squash_merge: true
 
   # Merged branches are junk, and GitHub will not clear them up on its own.
   # Forward-looking only -- see maintenance.prune_merged_branches below for
-  # what was left behind before this landed.
+  # what was left behind before this landed. Verified applied on all twenty
+  # repositories 2026-09-02.
   delete_branch_on_merge: true
 
 security:
@@ -26,6 +40,10 @@ security:
   # prCreation: immediate -- but Renovate reads GitHub's vulnerability alerts
   # to know what to fix. With this off on a repo, that entire security
   # fast-path is inert and nothing says so.
+  #
+  # It WAS off. On 2026-09-02 the first successful reconcile found alerts
+  # disabled on all twenty repositories and enabled them. Renovate's security
+  # path had never had anything to read.
   dependabot_alerts: enabled
 
   # REMEDIATION, and deliberately off. Renovate already opens these PRs
@@ -37,7 +55,7 @@ security:
 
   # Reported, never written. Availability varies by plan and repository
   # visibility, and a reconciler that fails on something it cannot control
-  # teaches people to ignore it.
+  # teaches people to ignore it. Currently `unavailable` on all twenty.
   secret_scanning: report_only
 
 maintenance:
