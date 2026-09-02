@@ -11,10 +11,11 @@
 # on it -- which is exactly how agent-os ran a pipeline whose auto-merge step
 # failed with `Resource not accessible by integration (mergePullRequest)`.
 #
-# WHAT IS NATIVE INSTEAD. Dependabot alerts *do* have an org-level control:
-# Organization Settings -> Code security. Set them there as the primary
-# mechanism; this job then verifies rather than assumes, which is the whole
-# lesson of the settings-shaped defects this estate has already hit.
+# A 2xx IS NOT EVIDENCE. GitHub accepts a settings PATCH, returns success, and
+# silently discards fields the plan does not support. Measured 2026-09-02:
+# this job reported "0 could not be written" across twenty repositories while
+# allow_auto_merge had moved on none of them, because auto-merge is not
+# available on private repositories below Pro. Every write is now read back.
 #
 # TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot
 # write settings on others, so this needs `ORG_ADMIN_TOKEN` -- a fine-grained
@@ -99,6 +100,7 @@ jobs:
           DESIRED=$(yq -o=json '.repository' "${POLICY}")
           WANT_ALERTS=$(yq -r '.security.dependabot_alerts // "unset"' "${POLICY}")
           WANT_FIXES=$(yq -r '.security.dependabot_security_updates // "unset"' "${POLICY}")
+          KEYS=$(echo "${DESIRED}" | jq -r 'keys | join(",")')
 
           echo "Reconciling ${ORG} (event: ${GITHUB_EVENT_NAME}, dry-run: ${DRY_RUN})"
           echo "policy: $(echo "${DESIRED}" | jq -c .)"
@@ -116,7 +118,7 @@ jobs:
             exit 1
           fi
 
-          total=0; changed=0; failed=0
+          total=0; changed=0; failed=0; blocked=0
 
           # $1 verb, $2 path, $3 label. Warns rather than stopping: one repo
           # refusing a write must not hide the other nineteen.
@@ -135,8 +137,7 @@ jobs:
             note=""
 
             # --- merge settings -------------------------------------------
-            keys=$(echo "${DESIRED}" | jq -r 'keys | join(",")')
-            current=$(gh api "repos/${repo}" --jq "{$(echo "${keys}" | tr ',' '\n' | sed 's/.*/&/' | paste -sd, -)}")
+            current=$(gh api "repos/${repo}" --jq "{${KEYS}}")
 
             # Only the keys that differ. A full-object PATCH is how the
             # documented "updating a repository through the API disables
@@ -148,7 +149,17 @@ jobs:
               note="merge:$(echo "${diff}" | jq -c .)"
               if [ "${DRY_RUN}" != "true" ]; then
                 if echo "${diff}" | gh api -X PATCH "repos/${repo}" --input - >/dev/null 2>&1; then
-                  :
+                  # READ BACK. The PATCH returning 2xx does not mean the field
+                  # changed: GitHub silently drops settings the plan does not
+                  # support, and allow_auto_merge on a private repo below Pro
+                  # is the live example across all twenty of these.
+                  after=$(gh api "repos/${repo}" --jq "{${KEYS}}")
+                  stuck=$(jq -rn --argjson cur "${after}" --argjson want "${DESIRED}" \
+                    '$want | with_entries(select(.value != $cur[.key])) | keys | join(",")')
+                  if [ -n "${stuck}" ]; then
+                    note="${note} NOT-APPLIED:${stuck}"
+                    blocked=$((blocked + 1))
+                  fi
                 else
                   echo "::warning::could not patch merge settings on ${repo}"
                   failed=$((failed + 1))
@@ -194,7 +205,7 @@ jobs:
           done <<< "${repos}"
 
           echo
-          echo "${total} repositories, ${changed} drifted, ${failed} could not be written"
+          echo "${total} repositories, ${changed} drifted, ${failed} could not be written, ${blocked} had keys the plan refuses"
           {
             echo "### Repository policy reconcile"
             echo
@@ -204,11 +215,15 @@ jobs:
             echo "- repositories: ${total}"
             echo "- drifted: ${changed}"
             echo "- failed to write: ${failed}"
+            echo "- keys silently refused by GitHub: ${blocked}"
             echo
             echo "Policy source: \`settings.yml\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          # A run that could not write what it found is not a success.
+          # A run that could not write what it found is not a success. A key
+          # the PLAN forbids is different: no token can change it, and failing
+          # nightly over it would make this permanently red, which is how a
+          # check stops being read. Reported loudly, not fatal.
           if [ "${failed}" -gt 0 ] && [ "${DRY_RUN}" != "true" ]; then
             exit 1
           fi
