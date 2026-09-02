@@ -14,17 +14,36 @@
 # WHAT IS NATIVE INSTEAD. Dependabot alerts *do* have an org-level control:
 # Organization Settings -> Code security. Set them there as the primary
 # mechanism; this job then verifies rather than assumes, which is the whole
-# lesson of the three settings-shaped defects this estate has already hit.
+# lesson of the settings-shaped defects this estate has already hit.
 #
 # TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot
 # write settings on others, so this needs `ORG_ADMIN_TOKEN` -- a fine-grained
 # PAT or App installation token with Administration: write and
 # Vulnerability alerts: write on the org's repositories.
+#
+# IT ALSO NEEDS contents: read, and forgetting that cost this job every
+# scheduled run it ever had. See the per-job permissions block below.
 name: repo-settings-reconcile
 
 on:
+  # EVENT-DRIVEN FIRST. Editing the policy IS the decision to apply it, so a
+  # merge to settings.yml reconciles within seconds instead of waiting for
+  # 04:00. Added 2026-09-02.
+  push:
+    branches: [main]
+    paths:
+      - settings.yml
   schedule:
-    # 04:00 UTC daily. Applies.
+    # Still nightly, and still worth having. The two drift sources this file
+    # cannot see as events are a NEW repository appearing and someone editing
+    # a setting in the UI. Both are organisation-level webhook events, and
+    # GitHub Actions can only be triggered by events in its OWN repository --
+    # so catching them needs an org webhook plus a receiver firing
+    # repository_dispatch, not a trigger. Until that exists, the clock is the
+    # fallback.
+    #
+    # Observed jitter on this cron has been up to six hours. Do not read
+    # "0 4" as a promise, and do not bother staggering these by minutes.
     - cron: "0 4 * * *"
   workflow_dispatch:
     inputs:
@@ -40,6 +59,15 @@ jobs:
     name: Reconcile repository policy
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # REQUIRED, and its absence was a live defect. `permissions: {}` above sets
+    # every scope to none, so actions/checkout could not read this PRIVATE
+    # repository and failed with "Repository not found" -- GitHub returns 404
+    # rather than 403 for an unauthorised private repo, which reads like the
+    # repo is missing rather than like a permissions bug. The only scheduled
+    # run this job ever had (2026-09-01T09:17:46Z) died there, silently, and
+    # the estate went unreconciled with every indicator looking normal.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -47,9 +75,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
           ORG: ${{ github.repository_owner }}
-          # Scheduled runs apply. A hand-run reports only, so nobody discovers
-          # the blast radius by causing it.
-          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
+          # Scheduled runs apply. A push to settings.yml applies, because
+          # editing the policy and merging it IS the decision. Only a hand-run
+          # defaults to reporting, so nobody discovers the blast radius by
+          # causing it.
+          DRY_RUN: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && 'false' || inputs.dry-run }}
         run: |
           set -euo pipefail
 
@@ -70,7 +100,7 @@ jobs:
           WANT_ALERTS=$(yq -r '.security.dependabot_alerts // "unset"' "${POLICY}")
           WANT_FIXES=$(yq -r '.security.dependabot_security_updates // "unset"' "${POLICY}")
 
-          echo "Reconciling ${ORG} (dry-run: ${DRY_RUN})"
+          echo "Reconciling ${ORG} (event: ${GITHUB_EVENT_NAME}, dry-run: ${DRY_RUN})"
           echo "policy: $(echo "${DESIRED}" | jq -c .)"
           echo "dependabot alerts: ${WANT_ALERTS} | security updates: ${WANT_FIXES}"
           echo
@@ -169,6 +199,7 @@ jobs:
             echo "### Repository policy reconcile"
             echo
             echo "- org: \`${ORG}\`"
+            echo "- trigger: \`${GITHUB_EVENT_NAME}\`"
             echo "- dry run: \`${DRY_RUN}\`"
             echo "- repositories: ${total}"
             echo "- drifted: ${changed}"
