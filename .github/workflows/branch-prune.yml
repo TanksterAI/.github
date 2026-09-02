@@ -16,6 +16,14 @@ on:
   schedule:
     # Weekly, not nightly. There is no hurry, and a slower cadence means a
     # mistake has more chance of being noticed between runs.
+    #
+    # No event drives this one usefully. The natural trigger -- a PR being
+    # merged -- is `pull_request: closed` in the repo the merge happened in,
+    # and this job runs in .github and sweeps all twenty. An event in agent-os
+    # reaches Actions in agent-os, not here. More to the point,
+    # delete_branch_on_merge: true in settings.yml now handles new merges
+    # natively, so what remains is a one-off backlog clear rather than
+    # recurring work.
     - cron: "0 5 * * 1"
   workflow_dispatch:
     inputs:
@@ -31,6 +39,13 @@ jobs:
     name: Prune merged branches
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Same defect repo-settings-reconcile.yml hit on 2026-09-01: `permissions:
+    # {}` above sets every scope to none, so checkout cannot read this private
+    # repository and fails with "Repository not found". This job has never run,
+    # so it had not surfaced yet -- it would have failed identically on
+    # 2026-09-07.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -67,7 +82,7 @@ jobs:
             exit 1
           fi
 
-          total=0; deleted=0; skipped=0
+          total=0; deleted=0; skipped=0; unread=0
 
           while IFS= read -r repo; do
             default_branch=$(gh api "repos/${repo}" --jq '.default_branch')
@@ -78,10 +93,20 @@ jobs:
 
             # Merged PRs whose head branch lived in this repo. A fork's branch
             # is not ours to delete.
-            merged_heads=$(gh pr list --repo "${repo}" --state merged --limit 200 \
+            #
+            # A failure here is counted, not skipped. "the token cannot read
+            # this repo" and "nothing to prune" produce the same empty string,
+            # and reporting a clean sweep over repositories this job never
+            # managed to examine is the defect this estate keeps finding.
+            if merged_heads=$(gh pr list --repo "${repo}" --state merged --limit 200 \
               --json headRefName,headRepositoryOwner \
-              --jq ".[] | select(.headRepositoryOwner.login == \"${ORG}\") | .headRefName" \
-              2>/dev/null || true)
+              --jq ".[] | select(.headRepositoryOwner.login == \"${ORG}\") | .headRefName"); then
+              :
+            else
+              echo "::warning::could not list merged PRs for ${repo}; not swept"
+              unread=$((unread + 1))
+              continue
+            fi
 
             [ -z "${merged_heads}" ] && continue
 
@@ -122,7 +147,7 @@ jobs:
           done <<< "${repos}"
 
           echo
-          echo "${total} candidates, ${deleted} deleted, ${skipped} skipped"
+          echo "${total} candidates, ${deleted} deleted, ${skipped} skipped, ${unread} repos unreadable"
           {
             echo "### Merged-branch sweep"
             echo
@@ -130,4 +155,10 @@ jobs:
             echo "- candidates: ${total}"
             echo "- deleted: ${deleted}"
             echo "- skipped: ${skipped}"
+            echo "- repositories that could not be read: ${unread}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+          # A sweep that could not read part of the estate has not swept it.
+          if [ "${unread}" -gt 0 ]; then
+            exit 1
+          fi
