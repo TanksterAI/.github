@@ -11,6 +11,19 @@
 #     lockfile must not silently change declared dependency ranges.
 #   * prove the result. A lockfile that resolves but cannot be installed
 #     frozen is worse than no change at all.
+#
+# Two modes:
+#
+#   * resolve (default) -- `install --lockfile-only`. Adds or removes entries
+#     so the lockfile matches package.json, but keeps every resolution that is
+#     still in range. This is the right mode after editing package.json.
+#   * maintenance -- discard the lockfile and resolve every range afresh, the
+#     way Renovate's lockFileMaintenance does. This is the only way to move a
+#     TRANSITIVE dependency to a newer version its range already allows
+#     (`install --lockfile-only` deliberately keeps existing resolutions, so an
+#     osv-scanner finding on a transitive package never clears in resolve
+#     mode). package.json is still never rewritten -- `update` is not used
+#     because pnpm's update rewrites the declared ranges as a side effect.
 name: lockfile
 
 on:
@@ -29,6 +42,10 @@ on:
       node-version:
         type: string
         default: ""
+      mode:
+        description: resolve (keep in-range resolutions) or maintenance (regenerate from scratch).
+        type: string
+        default: resolve
       runs-on:
         type: string
         default: ubuntu-latest
@@ -86,9 +103,38 @@ jobs:
         id: before
         run: echo "sum=$(sha256sum package.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
+      - name: Determine lockfile
+        id: lock
+        run: |
+          set -euo pipefail
+          if [ "${PM}" = "pnpm" ]; then
+            echo "path=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=package-lock.json" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          PM: ${{ inputs.package-manager }}
+
+      - name: Validate mode
+        run: |
+          set -euo pipefail
+          case "${MODE}" in
+            resolve|maintenance) ;;
+            *)
+              echo "::error title=Unknown mode::mode must be 'resolve' or 'maintenance', got '${MODE}'."
+              exit 1
+              ;;
+          esac
+        env:
+          MODE: ${{ inputs.mode }}
+
       - name: Resolve dependencies
         run: |
           set -euo pipefail
+          if [ "${MODE}" = "maintenance" ]; then
+            echo "maintenance mode: discarding ${LOCKFILE} and resolving every range afresh."
+            rm -f -- "${LOCKFILE}"
+          fi
           if [ "${PM}" = "pnpm" ]; then
             pnpm install --lockfile-only
           else
@@ -96,6 +142,8 @@ jobs:
           fi
         env:
           PM: ${{ inputs.package-manager }}
+          MODE: ${{ inputs.mode }}
+          LOCKFILE: ${{ steps.lock.outputs.path }}
 
       - name: Refuse if package.json was rewritten
         run: |
@@ -108,18 +156,6 @@ jobs:
           fi
         env:
           BEFORE: ${{ steps.before.outputs.sum }}
-
-      - name: Determine lockfile
-        id: lock
-        run: |
-          set -euo pipefail
-          if [ "${PM}" = "pnpm" ]; then
-            echo "path=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
-          else
-            echo "path=package-lock.json" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          PM: ${{ inputs.package-manager }}
 
       # Stage first. `git diff --quiet` cannot see an untracked file, so a
       # brand-new lockfile would otherwise report as "already up to date".
@@ -160,7 +196,12 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: regenerate ${LOCKFILE}"
+          if [ "${MODE}" = "maintenance" ]; then
+            git commit -m "chore(deps): lockfile maintenance -- regenerate ${LOCKFILE} from scratch"
+          else
+            git commit -m "chore: regenerate ${LOCKFILE}"
+          fi
           git push
         env:
           LOCKFILE: ${{ steps.lock.outputs.path }}
+          MODE: ${{ inputs.mode }}
