@@ -115,7 +115,7 @@ jobs:
             # reading null as "fine" is how this check would silently pass
             # over every PR it exists to catch.
             state="null"; mergeable="null"
-            for attempt in 1 2 3 4 5 6 7 8; do
+            for _ in 1 2 3 4 5 6 7 8; do
               read -r mergeable state < <(gh api "repos/${REPO}/pulls/${pr}" \
                 --jq '[(.mergeable | tostring), (.mergeable_state // "unknown")] | @tsv' 2>/dev/null || echo "null unknown")
               case "${mergeable}" in true|false) break ;; esac
