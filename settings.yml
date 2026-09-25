@@ -68,5 +68,120 @@ maintenance:
   # Off by default. Turn it on deliberately, and watch one dry run first.
   prune_merged_branches: false
 
+rulesets:
+  # THE MERGE GATE. Nothing reaches a default branch without a reviewed pull
+  # request: CodeRabbit has reviewed and approved the latest commit, every
+  # review conversation is resolved, and CI is green. Nobody bypasses it --
+  # not an admin, and not an agent working with an admin's token. That second
+  # case is the one that happened: on 2026-09-25 two evidence-reply PRs were
+  # merged by an agent while CodeRabbit's status still read "Review in
+  # progress", and the review was abandoned. Nothing stopped it, because
+  # nothing here could.
+  #
+  # WHY PER-REPOSITORY RULESETS, not one org ruleset. Written by this file into
+  # every repository, a ruleset works the same way on the org and on a personal
+  # account, which has no account-level rulesets at all. GitHub's own docs also
+  # disagree about which plan gets org-level rulesets. A per-repo ruleset needs
+  # only Pro or Team.
+  #
+  # BLOCKED BY THE PLAN until the org moves to Team. On a Free private
+  # repository GitHub refuses rulesets outright ("Upgrade to GitHub Pro or make
+  # this repository public"). The reconciler reports that as PLAN-BLOCKED
+  # rather than failing, like allow_auto_merge above, and applies everything
+  # on the first run after the upgrade.
+  review-gate:
+    enforcement: active
+    branches: ["~DEFAULT_BRANCH"]
+
+    # GitHub App slugs, resolved to IDs at run time. Bypass here is
+    # `pull_request` mode only: the app may merge its own pull request, never
+    # push to the branch directly.
+    #
+    # Renovate, and only Renovate. CodeRabbit refuses to review pull requests
+    # from bots ("Review skipped: bot user not eligible for review"), so it
+    # can never approve one, and without this every dependency update would
+    # sit blocked forever. Renovate automerges only once the branch's own
+    # checks are green.
+    #
+    # Deliberately NOT here:
+    # - Dependabot never merges its own pull requests, so bypass would do
+    #   nothing for it.
+    # - github-actions performs the merge when a workflow enables auto-merge.
+    #   Giving it bypass would let any workflow in any repository merge past
+    #   this gate, which is the hole this ruleset exists to close. Dependabot
+    #   pull requests therefore need a human approval, or the repository moves
+    #   to Renovate, which is this estate's updater anyway.
+    bypass_apps: [renovate]
+
+    pull_request:
+      # The one approval comes from CodeRabbit, which approves only once its
+      # comments are resolved, it has reviewed the latest commit, and no
+      # pre-merge check is failing. That needs "Request Changes Workflow"
+      # switched on in CodeRabbit's organisation settings. On a one-person
+      # org the author can't approve their own pull request, so CodeRabbit is
+      # the only reviewer who can.
+      required_approving_review_count: 1
+      # A push after approval drops it, so the approval always covers the
+      # code that merges.
+      dismiss_stale_reviews_on_push: true
+      required_review_thread_resolution: true
+      require_code_owner_review: false
+      require_last_push_approval: false
+      allowed_merge_methods: [squash]
+
+    required_checks:
+      # The branch must be up to date with its base before merging, so the
+      # green checks describe the code that actually lands.
+      strict: true
+
+      # Required everywhere, and pinned to the app that must post it: a
+      # workflow cannot satisfy it by posting its own status named
+      # "CodeRabbit". This status alone is NOT proof of review, because
+      # CodeRabbit marks it success even when it skipped or was rate limited.
+      # The approval above is the proof. This check makes the merge wait
+      # while a review is still running.
+      everywhere:
+        - context: CodeRabbit
+          app: coderabbitai
+
+      # Each repository's CI, by exact check-run name, all from GitHub Actions.
+      # Names are copied from real pull-request runs, or from the shared
+      # reusable workflows, where the name is "<caller job> / <job name>".
+      #
+      # Left out on purpose, because requiring them would block pull requests
+      # forever or add nothing:
+      # - advisory checks that pass whatever they find: `security / Ecosystem
+      #   audit`, `ci / Lint` with lint-strict off, Lighthouse, shellcheck;
+      # - checks that are always skipped on a pull request (`ci / Typecheck`
+      #   when typecheck is off, and agent-pipeline's jobs);
+      # - checks that only run when certain paths change (`actionlint /
+      #   actionlint` in consuming repositories): if one is required, any
+      #   other pull request waits forever for a check that never starts.
+      #
+      # A repository missing from this list gets the review gate but no CI
+      # requirement, and the reconciler reports it as `no-ci-checks`.
+      per_repo:
+        .github: ["actionlint", "Renovate presets"]
+        agent-egress-proxy: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
+        agent-egress-proxy-clean: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
+        agent-os: ["test"]
+        ai-influencer-engine: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
+        coolify-mcp-oauth: ["image", "Privilege drop and volume adoption"]
+        cymatics-engine: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
+        drillwright: ["checks"]
+        evidence-reply: ["image"]
+        grit: ["ci / Verify", "Guard the sandbox claim", "security / Secrets", "security / Vulnerable dependencies"]
+        quarterdeck: ["Lint · Typecheck · Build · Test", "security / Secrets", "security / Vulnerable dependencies"]
+        tankster-ai-public: ["Lint · Typecheck · Build", "security / Secrets", "security / Vulnerable dependencies"]
+        tankster-books: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
+        tankster-core: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies", "no unresolved review threads"]
+        tankster-infra: ["validate", "security / Secrets", "security / Vulnerable dependencies"]
+        tankster-scribe: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
+        tankster-seed: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
+
+    # No force-pushes and no deleting the default branch.
+    block_force_push: true
+    block_deletion: true
+
 # Version updates are deliberately absent, and no dependabot.yml is shipped:
 # that would duplicate Renovate outright and put two changelogs on every bump.
