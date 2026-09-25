@@ -1,0 +1,31 @@
+name: zz-tmp-apply
+
+on:
+  push:
+    branches: [review-gate-ruleset]
+    paths: ['.github/zz-fix.patch']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Apply the patch, verify every file, commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 -b review-gate-ruleset "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" r
+          cd r
+          patch -p1 -F0 --no-backup-if-mismatch < .github/zz-fix.patch
+          [ "$(git hash-object settings.yml)" = 9d5f00ca59d9686732233f72d6938b734dd27985 ] || { echo MISMATCH settings.yml; exit 1; }
+          [ "$(git hash-object README.md)" = b4b5bb5e9cc6dd56144a4c8015a173ec719eefbc ] || { echo MISMATCH README.md; exit 1; }
+          git rm -q .github/zz-fix.patch
+          git add -A
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "feat: review-gate on every repository, no pilot list" \
+            -m "The org moved to Team on 2026-09-25, and the next nightly run would apply allow_auto_merge. Auto-merge with no gate means a PR merges the moment CI is green, so the gate went onto all 33 repositories by hand that evening. only_repos is removed so this file keeps the gate everywhere and adds each repository's CI checks. The PLAN-BLOCKED notes are updated for Team."
+          git push -q origin HEAD:review-gate-ruleset
