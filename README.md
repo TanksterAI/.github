@@ -56,7 +56,7 @@ needs to be insulated from that.
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
 | `claude-review.yml` | any | Claude posts inline line-level PR review comments -- **retired 30 Aug 2026**, no active callers; CodeRabbit Pro is now the org's sole PR reviewer (see "The agent pipeline" below). Kept in the repo, unused, in case that changes |
 | `claude-address-feedback.yml` | any | Claude reads unresolved review threads (CodeRabbit + its own), fixes, resolves, pushes |
-| `auto-merge-gate.yml` | any | Enables/disables `gh pr merge --auto` per PR based on an opt-out label; merge timing itself comes from the org ruleset |
+| `auto-merge-gate.yml` | any | Enables/disables `gh pr merge --auto` per PR based on an opt-out label; merge timing itself comes from the `review-gate` ruleset |
 
 Every job sets `timeout-minutes` and a least-privilege `permissions` block.
 Callers still need their own `permissions` block, because the caller's grant is
@@ -108,9 +108,22 @@ opened to merged with no human review, by default, org-wide:
    and the cycle repeats until nothing is left to flag.
 3. **`auto-merge-gate.yml`** enables `gh pr merge --auto` on the PR the
    moment it's opened (unless it carries `needs-human-review`).
-4. **The org ruleset** -- required status checks green, and every review
-   conversation resolved -- is what actually lets GitHub complete the merge.
-   Neither workflow above ever calls merge itself.
+4. **The review gate** is what actually lets GitHub complete the merge.
+   Neither workflow above ever calls merge itself. The gate is the
+   `review-gate` ruleset declared in `settings.yml`, which
+   `repo-settings-reconcile.yml` writes into every repository. It requires:
+   - CodeRabbit's approval of the latest commit;
+   - every review conversation resolved;
+   - the `CodeRabbit` status plus the repo's CI checks green, on a branch that
+     is up to date with its base;
+   - no bypass for people, admins included. Only Renovate may merge its own
+     PRs past it, because CodeRabbit won't review bot PRs.
+
+   Private repositories need GitHub Team for this, so until the org moves
+   plan the reconciler reports it as `PLAN-BLOCKED`. Agents working with an
+   admin's token are bound by the gate like everyone else. It exists because
+   on 2026-09-25 an agent merged two PRs while CodeRabbit's review was still
+   running.
 
 Requires, at the organisation level (not reproducible by a workflow file,
 so done once by hand): the Claude GitHub App installed org-wide; **either**
@@ -127,8 +140,10 @@ is enough to switch the whole org over with no workflow edit. See the
 header comment in that file for the full reasoning, including the
 trade-off of an OAuth secret shared across every repo pooling its rate
 limit with the token owner's own interactive usage. Also required
-regardless of which credential is used: the ruleset itself, and each
-repo's own "Allow auto-merge" setting turned on. See
+regardless of which credential is used: the ruleset itself, CodeRabbit's
+"Request Changes Workflow" switched on in its organisation settings (without
+it CodeRabbit never approves, and the gate never opens), and each repo's own
+"Allow auto-merge" setting turned on. See
 `claude/infrastructure-conventions.md` in the Tankster AI project for the
 full checklist and current status.
 
