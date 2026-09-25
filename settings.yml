@@ -103,6 +103,12 @@ rulesets:
     # sit blocked forever. Renovate automerges only once the branch's own
     # checks are green.
     #
+    # The bypass applies to the actor that performs the merge, so Renovate must
+    # merge directly as itself. GitHub's native auto-merge completes the merge
+    # on its own schedule, and the bypass doesn't carry over to it. That is why
+    # default.json sets platformAutomerge: false and auto-merge-gate.yml skips
+    # bot pull requests.
+    #
     # Deliberately NOT here:
     # - Dependabot never merges its own pull requests, so bypass would do
     #   nothing for it.
@@ -120,6 +126,12 @@ rulesets:
       # switched on in CodeRabbit's organisation settings. On a one-person
       # org the author can't approve their own pull request, so CodeRabbit is
       # the only reviewer who can.
+      #
+      # PROVE IT BEFORE RELYING ON IT. GitHub doesn't document whether an app's
+      # approval counts, and other repos report that CodeRabbit's does. After the
+      # plan upgrade, apply this to one repository first, open a test pull request
+      # and check that CodeRabbit's approval turns mergeStateStatus from BLOCKED
+      # to CLEAN, before letting the reconciler apply it everywhere.
       required_approving_review_count: 1
       # A push after approval drops it, so the approval always covers the
       # code that merges.

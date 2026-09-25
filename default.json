@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Baseline Renovate policy. Consume with \"extends\": [\"github>TanksterAI/.github\"].",
+  "description": "Baseline Renovate policy. Consume with \"extends\": [\"github>TanksterAI/.github\"]. platformAutomerge is false so Renovate merges its own PRs directly, as itself: the review-gate ruleset lets only the Renovate app past it, and GitHub's native auto-merge would not carry that bypass.",
   "extends": [
     "config:recommended",
     ":semanticCommits",
@@ -13,6 +13,7 @@
   "prHourlyLimit": 2,
   "labels": ["dependencies"],
   "rangeStrategy": "bump",
+  "platformAutomerge": false,
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["* 0-6 1 * *"]

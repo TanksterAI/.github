@@ -278,8 +278,10 @@ jobs:
             for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
               pol=$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')
               want=$(build_ruleset "${rs}" "${repo#*/}" "${pol}")
+              # A repo with no CI checks declared is a known policy state, not drift:
+              # reported on every run, but not counted.
               if [ "$(echo "${pol}" | jq --arg r "${repo#*/}" '.required_checks.per_repo | has($r)')" != "true" ]; then
-                note="${note} ruleset:${rs}:no-ci-checks"
+                echo "info      ${repo}: ruleset:${rs}:no-ci-checks"
               fi
 
               if ! list=$(gh api "repos/${repo}/rulesets?includes_parents=false&per_page=100" 2>&1); then

@@ -4,9 +4,9 @@
 # the opt-out label -- and turns it back off if that label is added later,
 # or on again if the label is removed.
 #
-# The actual merge timing is entirely governed by the TanksterAI org ruleset
-# (required status checks + require all conversations resolved), not by
-# anything in this file: this file only flips the one switch GitHub
+# The actual merge timing is entirely governed by the review-gate ruleset
+# (see settings.yml: CodeRabbit approval, required status checks, all
+# conversations resolved), not by anything in this file: this file only flips the one switch GitHub
 # rulesets don't cover -- the per-PR opt-in that `gh pr merge --auto`
 # requires -- and never merges anything itself.
 #
@@ -14,6 +14,11 @@
 # (Settings -> General -> Pull Requests). Until that's flipped, this job
 # fails loudly and visibly on every PR -- expected, not a bug, during
 # rollout before that repo setting is turned on.
+#
+# Bot PRs are skipped. CodeRabbit won't review them, so native auto-merge
+# would wait forever for an approval that never comes. Renovate merges its
+# own PRs directly instead (platformAutomerge: false in default.json), as the
+# one app the ruleset lets past.
 name: auto-merge-gate
 
 on:
@@ -34,7 +39,7 @@ permissions:
 jobs:
   gate:
     name: Set auto-merge
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

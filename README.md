@@ -117,13 +117,17 @@ opened to merged with no human review, by default, org-wide:
    - the `CodeRabbit` status plus the repo's CI checks green, on a branch that
      is up to date with its base;
    - no bypass for people, admins included. Only Renovate may merge its own
-     PRs past it, because CodeRabbit won't review bot PRs.
+     PRs past it, because CodeRabbit won't review bot PRs. That works only
+     when Renovate merges directly as itself (`platformAutomerge: false` in
+     `default.json`), which is why `auto-merge-gate.yml` skips bot PRs.
 
    Private repositories need GitHub Team for this, so until the org moves
-   plan the reconciler reports it as `PLAN-BLOCKED`. Agents working with an
-   admin's token are bound by the gate like everyone else. It exists because
-   on 2026-09-25 an agent merged two PRs while CodeRabbit's review was still
-   running.
+   plan the reconciler reports it as `PLAN-BLOCKED`. An agent working with an
+   admin's token can't merge past an active gate, but that token can still
+   edit or delete the ruleset itself. The reconciler puts it back on its next
+   run, not instantly, so keep admin tokens away from agents where you can.
+   The gate exists because on 2026-09-25 an agent merged two PRs while
+   CodeRabbit's review was still running.
 
 Requires, at the organisation level (not reproducible by a workflow file,
 so done once by hand): the Claude GitHub App installed org-wide; **either**
