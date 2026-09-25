@@ -277,6 +277,10 @@ jobs:
             # a failure, for the same reason as a plan-refused merge setting.
             for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
               pol=$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')
+              # A pilot: while `only_repos` is set, other repositories are left alone.
+              if [ "$(echo "${pol}" | jq --arg r "${repo#*/}" 'has("only_repos") and ((.only_repos | index($r)) == null)')" = "true" ]; then
+                continue
+              fi
               want=$(build_ruleset "${rs}" "${repo#*/}" "${pol}")
               # A repo with no CI checks declared is a known policy state, not drift:
               # reported on every run, but not counted.

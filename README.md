@@ -111,7 +111,9 @@ opened to merged with no human review, by default, org-wide:
 4. **The review gate** is what actually lets GitHub complete the merge.
    Neither workflow above ever calls merge itself. The gate is the
    `review-gate` ruleset declared in `settings.yml`, which
-   `repo-settings-reconcile.yml` writes into every repository. It requires:
+   `repo-settings-reconcile.yml` writes into every repository (at first only
+   into the pilot repos in `only_repos`, until a real PR proves CodeRabbit's
+   approval counts). It requires:
    - CodeRabbit's approval of the latest commit;
    - every review conversation resolved;
    - the `CodeRabbit` status plus the repo's CI checks green, on a branch that

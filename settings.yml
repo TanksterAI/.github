@@ -93,6 +93,15 @@ rulesets:
     enforcement: active
     branches: ["~DEFAULT_BRANCH"]
 
+    # PILOT FIRST. While this list exists, the ruleset is written only to the
+    # repositories named here. The one open question is whether GitHub counts
+    # CodeRabbit's approval (see pull_request below), and that can only be
+    # answered on a real PR once the org is on Team. Delete this key, and the
+    # next run applies the gate to every repository, only after a test PR here
+    # has shown mergeStateStatus going from BLOCKED to CLEAN on CodeRabbit's
+    # approval.
+    only_repos: [evidence-reply]
+
     # GitHub App slugs, resolved to IDs at run time. Bypass here is
     # `pull_request` mode only: the app may merge its own pull request, never
     # push to the branch directly.
@@ -128,10 +137,10 @@ rulesets:
       # the only reviewer who can.
       #
       # PROVE IT BEFORE RELYING ON IT. GitHub doesn't document whether an app's
-      # approval counts, and other repos report that CodeRabbit's does. After the
-      # plan upgrade, apply this to one repository first, open a test pull request
-      # and check that CodeRabbit's approval turns mergeStateStatus from BLOCKED
-      # to CLEAN, before letting the reconciler apply it everywhere.
+      # approval counts, and other repos report that CodeRabbit's does. That's
+      # what `only_repos` above is for. If it turns out not to count, don't just
+      # drop this to 0: the CodeRabbit status goes green on a skipped review, so
+      # the gate would no longer prove a review happened.
       required_approving_review_count: 1
       # A push after approval drops it, so the approval always covers the
       # code that merges.
