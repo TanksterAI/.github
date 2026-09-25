@@ -136,6 +136,14 @@ rulesets:
       # org the author can't approve their own pull request, so CodeRabbit is
       # the only reviewer who can.
       #
+      # A RULESET CAN'T NAME CODERABBIT AS THE REVIEWER. `required_reviewers`
+      # accepts teams only, not users or apps. So for a pull request that someone
+      # other than the owner opened (a Dependabot or agent-app PR), the owner's own
+      # approval also satisfies this. That's deliberate here: it's still a review,
+      # and it's how Dependabot PRs get through. For everything the owner's
+      # account opens, which is every agent working with the owner's token,
+      # CodeRabbit's approval is the only one that can count.
+      #
       # PROVE IT BEFORE RELYING ON IT. GitHub doesn't document whether an app's
       # approval counts, and other repos report that CodeRabbit's does. That's
       # what `only_repos` above is for. If it turns out not to count, don't just

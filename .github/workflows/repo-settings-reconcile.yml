@@ -187,6 +187,7 @@ jobs:
               $want.enforcement == $have.enforcement
               and $want.target == $have.target
               and ($want.conditions.ref_name.include | sort) == (($have.conditions.ref_name.include // []) | sort)
+              and ($want.conditions.ref_name.exclude | sort) == (($have.conditions.ref_name.exclude // []) | sort)
               and ($want.bypass_actors | actors) == (($have.bypass_actors // []) | actors)
               and ($want.rules | map(.type) | sort) == (($have.rules // []) | map(.type) | sort)
               and ($want.rules | all(rule_ok($have.rules // [])))'
