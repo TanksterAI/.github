@@ -229,39 +229,50 @@ jobs:
           }
 
           total=0; changed=0; failed=0; blocked=0
-          org_drift=0
+          org_drift=0; needs_org_admin=0
           # ruleset name -> "1" once read back from GitHub active and matching.
           # Only these may retire their repository-level copies.
           declare -A verified=()
           declare -A org_status=()
+
+          # An organisation-level call ($2: list, read, create, update) for
+          # ruleset $1 was refused, with gh output $3. Every org call goes
+          # through here, so no refusal can stop the run before the
+          # repositories are reconciled. The plan and a token without the org
+          # permission are reported, not failed; anything else is a failure.
+          org_refused() {
+            local why
+            why=$(org_refusal "$3")
+            if [ -z "${why}" ]; then
+              why=FAILED
+              failed=$((failed + 1))
+              echo "::warning::could not $2 org ruleset $1: $3"
+            else
+              blocked=$((blocked + 1))
+              if [ "${why}" = NEEDS-ORG-ADMIN ]; then needs_org_admin=1; fi
+            fi
+            org_status[$1]="${why}"
+            echo "blocked   org ruleset $1: $2(${why})"
+          }
 
           # --- organisation rulesets ----------------------------------------
           # Created if missing, updated if it differs from the policy, then read
           # back, because a 2xx is not evidence.
           echo "--- organisation rulesets"
           if ! org_list=$(gh api "orgs/${ORG}/rulesets?per_page=100" 2>&1); then
-            why=$(org_refusal "${org_list}")
-            if [ -z "${why}" ]; then
-              echo "::warning::could not list organisation rulesets: ${org_list}"
-              failed=$((failed + 1))
-              why=FAILED
-            else
-              blocked=$((blocked + 1))
-            fi
             for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
-              org_status[${rs}]="${why}"
-              echo "blocked   org ruleset ${rs}: ${why}"
+              org_refused "${rs}" list "${org_list}"
             done
-            if [ "${why}" = NEEDS-ORG-ADMIN ]; then
-              echo "::warning title=NEEDS-ORG-ADMIN::ORG_ADMIN_TOKEN cannot manage organisation rulesets. Grant it the organisation permission \"Administration: read and write\", or create them once by hand (Settings > Rules > Rulesets) to match settings.yml. Repository settings are still reconciled."
-            fi
           else
             for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
               want=$(build_ruleset "${rs}" "$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')")
               rs_id=$(echo "${org_list}" | jq -r --arg n "${rs}" '[.[] | select(.name == $n)][0].id // empty')
 
               if [ -n "${rs_id}" ]; then
-                have=$(gh api "orgs/${ORG}/rulesets/${rs_id}")
+                if ! have=$(gh api "orgs/${ORG}/rulesets/${rs_id}" 2>&1); then
+                  org_refused "${rs}" read "${have}"
+                  continue
+                fi
                 if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
                   org_status[${rs}]="ok"
                   echo "ok        org ruleset ${rs} ($(echo "${want}" | jq -r .enforcement))"
@@ -281,22 +292,16 @@ jobs:
               fi
 
               if ! out=$(echo "${want}" | gh api -X "${verb}" "${path}" --input - 2>&1); then
-                why=$(org_refusal "${out}")
-                if [ -n "${why}" ]; then
-                  org_status[${rs}]="${why}"
-                  echo "drift     org ruleset ${rs}: ${action}(${why})"
-                  blocked=$((blocked + 1))
-                else
-                  org_status[${rs}]="FAILED"
-                  echo "::warning::could not ${action} org ruleset ${rs}: ${out}"
-                  failed=$((failed + 1))
-                fi
+                org_refused "${rs}" "${action}" "${out}"
                 continue
               fi
               # READ BACK what GitHub now holds, and check it enforces what
-              # was asked.
+              # was asked. A read-back that fails is not verification.
               rs_id=$(echo "${out}" | jq -r '.id')
-              have=$(gh api "orgs/${ORG}/rulesets/${rs_id}")
+              if ! have=$(gh api "orgs/${ORG}/rulesets/${rs_id}" 2>&1); then
+                org_refused "${rs}" "read back after ${action}" "${have}"
+                continue
+              fi
               if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
                 org_status[${rs}]="${action}d"
                 echo "drift     org ruleset ${rs}: ${action}"
@@ -308,6 +313,9 @@ jobs:
                 failed=$((failed + 1))
               fi
             done
+          fi
+          if [ "${needs_org_admin}" = 1 ]; then
+            echo "::warning title=NEEDS-ORG-ADMIN::ORG_ADMIN_TOKEN cannot manage organisation rulesets. Grant it the organisation permission \"Administration: read and write\", or create them once by hand (Settings > Rules > Rulesets) to match settings.yml. Repository settings are still reconciled."
           fi
 
           # Repository rulesets to retire: only those whose org ruleset asked
