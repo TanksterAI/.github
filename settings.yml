@@ -84,23 +84,23 @@ rulesets:
   # disagree about which plan gets org-level rulesets. A per-repo ruleset needs
   # only Pro or Team.
   #
-  # BLOCKED BY THE PLAN until the org moves to Team. On a Free private
-  # repository GitHub refuses rulesets outright ("Upgrade to GitHub Pro or make
-  # this repository public"). The reconciler reports that as PLAN-BLOCKED
-  # rather than failing, like allow_auto_merge above, and applies everything
-  # on the first run after the upgrade.
+  # NEEDS GITHUB TEAM (or Pro) for private repositories. On Free, GitHub refuses
+  # rulesets outright ("Upgrade to GitHub Pro or make this repository public").
+  # The org moved to Team on 2026-09-25. On a plan that can't hold rulesets,
+  # the reconciler reports PLAN-BLOCKED rather than failing, like
+  # allow_auto_merge above.
   review-gate:
     enforcement: active
     branches: ["~DEFAULT_BRANCH"]
 
-    # PILOT FIRST. While this list exists, the ruleset is written only to the
-    # repositories named here. The one open question is whether GitHub counts
-    # CodeRabbit's approval (see pull_request below), and that can only be
-    # answered on a real PR once the org is on Team. Delete this key, and the
-    # next run applies the gate to every repository, only after a test PR here
-    # has shown mergeStateStatus going from BLOCKED to CLEAN on CodeRabbit's
-    # approval.
-    only_repos: [evidence-reply]
+    # EVERY REPOSITORY, with no pilot list. On 2026-09-25, the evening the org
+    # moved to Team, the gate was put on all 33 repositories by hand, because
+    # the next nightly run would apply allow_auto_merge above. Auto-merge with
+    # no gate means a PR merges the moment CI is green. This file now keeps
+    # that gate in place and adds each repository's CI checks below.
+    #
+    # To pilot a future change to the gate, add `only_repos: [name, ...]`: while
+    # it exists, the ruleset is written only to the repositories it names.
 
     # GitHub App slugs, resolved to IDs at run time. Bypass here is
     # `pull_request` mode only: the app may merge its own pull request, never
@@ -145,10 +145,11 @@ rulesets:
       # CodeRabbit's approval is the only one that can count.
       #
       # PROVE IT BEFORE RELYING ON IT. GitHub doesn't document whether an app's
-      # approval counts, and other repos report that CodeRabbit's does. That's
-      # what `only_repos` above is for. If it turns out not to count, don't just
-      # drop this to 0: the CodeRabbit status goes green on a skipped review, so
-      # the gate would no longer prove a review happened.
+      # approval counts. evidence-reply #4 is the test case: `blocked` until
+      # CodeRabbit approves the head, and it should then become mergeable. If
+      # it turns out not to count, don't just drop this to 0: the CodeRabbit
+      # status goes green on a skipped, paused or rate-limited review, so the
+      # gate would no longer prove a review happened.
       required_approving_review_count: 1
       # A push after approval drops it, so the approval always covers the
       # code that merges.

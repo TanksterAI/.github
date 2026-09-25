@@ -111,9 +111,7 @@ opened to merged with no human review, by default, org-wide:
 4. **The review gate** is what actually lets GitHub complete the merge.
    Neither workflow above ever calls merge itself. The gate is the
    `review-gate` ruleset declared in `settings.yml`, which
-   `repo-settings-reconcile.yml` writes into every repository (at first only
-   into the pilot repos in `only_repos`, until a real PR proves CodeRabbit's
-   approval counts). It requires:
+   `repo-settings-reconcile.yml` writes into every repository. It requires:
    - CodeRabbit's approval of the latest commit;
    - every review conversation resolved;
    - the `CodeRabbit` status plus the repo's CI checks green, on a branch that
@@ -123,8 +121,9 @@ opened to merged with no human review, by default, org-wide:
      when Renovate merges directly as itself (`platformAutomerge: false` in
      `default.json`), which is why `auto-merge-gate.yml` skips bot PRs.
 
-   Private repositories need GitHub Team for this, so until the org moves
-   plan the reconciler reports it as `PLAN-BLOCKED`. An agent working with an
+   Private repositories need GitHub Team for this; the org has been on Team
+   since 2026-09-25. On a plan that can't hold rulesets, the reconciler
+   reports `PLAN-BLOCKED`. An agent working with an
    admin's token can't merge past an active gate, but that token can still
    edit or delete the ruleset itself. The reconciler puts it back on its next
    run, not instantly, so keep admin tokens away from agents where you can.
