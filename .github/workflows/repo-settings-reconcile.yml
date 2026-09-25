@@ -20,13 +20,17 @@
 # TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot
 # write settings on others, so this needs `ORG_ADMIN_TOKEN` -- a fine-grained
 # PAT or App installation token with Administration: write and
-# Vulnerability alerts: write on the org's repositories. Administration: write
-# is also what creating and updating repository rulesets needs.
+# Vulnerability alerts: write on the org's repositories. The organisation
+# rulesets additionally need the ORGANISATION permission Administration:
+# read and write. Without that, the run reports NEEDS-ORG-ADMIN, leaves the
+# org rulesets alone, and still reconciles every repository's settings.
 #
-# RULESETS. settings.yml's `rulesets:` block is written into every repository
-# as a repository ruleset (the review gate: CodeRabbit approval, resolved
-# conversations, green CI, no bypass for people). See the comments there for
-# why it is per repository rather than one org ruleset.
+# RULESETS. settings.yml's `org_rulesets:` are written once, to the
+# organisation, targeting every repository (`~ALL`), so neither file ever
+# names a repository. A ruleset marked `retire_repo_rulesets` replaces the
+# repository rulesets of the same name that were put on each repository by
+# hand; those are deleted, but only after the org ruleset has been read back
+# active and matching, and only where the repository itself shows it.
 #
 # IT ALSO NEEDS contents: read, and forgetting that cost this job every
 # scheduled run it ever had. See the per-job permissions block below.
@@ -124,37 +128,52 @@ jobs:
             exit 1
           fi
 
-          # --- rulesets: setup ---------------------------------------------
+          # --- organisation rulesets: setup -------------------------------
+          RULESETS=$(yq -o=json '.org_rulesets // {}' "${POLICY}")
+
+          # A malformed entry stops the run before anything is written. A
+          # ruleset with no targets, or an enforcement GitHub would reject,
+          # must not be half-applied.
+          bad=$(echo "${RULESETS}" | jq -r 'to_entries[]
+            | select((.value.enforcement | IN("active", "disabled") | not)
+                or ((.value.repositories // []) | length) == 0
+                or ((.value.branches // []) | length) == 0)
+            | .key')
+          if [ -n "${bad}" ]; then
+            echo "::error::org_rulesets entries need enforcement (active|disabled), repositories and branches: ${bad//$'\n'/, }"
+            exit 1
+          fi
+
           # App slugs in the policy (bypass apps, and the app pinned to each
           # required check) become numeric IDs here, once, rather than being
-          # copied into settings.yml as magic numbers. github-actions is always
-          # resolved because per-repository CI checks are pinned to it. A slug
-          # that does not resolve stops the run: a ruleset pinned to the wrong
-          # app blocks every merge, and a bypass for the wrong app is a hole.
-          RULESETS=$(yq -o=json '.rulesets // {}' "${POLICY}")
+          # copied into settings.yml as magic numbers. A slug that does not
+          # resolve stops the run: a check pinned to the wrong app blocks
+          # every merge, and a bypass for the wrong app is a hole.
           slugs=$(echo "${RULESETS}" | jq -r \
-            '[.[] | (.bypass_apps // [])[], ((.required_checks.everywhere // [])[] | .app // empty)] + ["github-actions"] | unique | .[]')
+            '[.[] | (.bypass_apps // [])[], ((.required_checks.checks // [])[] | .app // "github-actions")] | unique | .[]')
           APP_IDS='{}'
           for slug in ${slugs}; do
             id=$(gh api "apps/${slug}" --jq .id) || { echo "::error::cannot resolve GitHub App '${slug}'"; exit 1; }
             APP_IDS=$(echo "${APP_IDS}" | jq --arg s "${slug}" --argjson i "${id}" '. + {($s): $i}')
           done
-          echo "rulesets: $(echo "${RULESETS}" | jq -r 'keys | join(", ")') | apps: $(echo "${APP_IDS}" | jq -c .)"
+          echo "org rulesets: $(echo "${RULESETS}" | jq -r 'keys | join(", ")') | apps: $(echo "${APP_IDS}" | jq -c .)"
           echo
 
-          # One ruleset from the policy, for one repository, in the shape the
-          # rulesets API takes.
+          # One ruleset from the policy, in the shape the organisation
+          # rulesets API takes. `exclude` is always empty: an exclusion added
+          # by hand is a gate switched off, so it is drift to repair.
           build_ruleset() {
-            jq -n --arg name "$1" --arg repo "$2" --argjson p "$3" --argjson apps "${APP_IDS}" '
-              ( [ ($p.required_checks.everywhere // [])[]
-                  | {context, integration_id: $apps[.app // "github-actions"]} ]
-              + [ ($p.required_checks.per_repo[$repo] // [])[]
-                  | {context: ., integration_id: $apps["github-actions"]} ] ) as $checks
+            jq -n --arg name "$1" --argjson p "$2" --argjson apps "${APP_IDS}" '
+              [ ($p.required_checks.checks // [])[]
+                | {context, integration_id: $apps[.app // "github-actions"]} ] as $checks
               | {
                   name: $name,
                   target: "branch",
                   enforcement: $p.enforcement,
-                  conditions: {ref_name: {include: $p.branches, exclude: []}},
+                  conditions: {
+                    repository_name: {include: $p.repositories, exclude: []},
+                    ref_name: {include: $p.branches, exclude: []}
+                  },
                   bypass_actors: [ ($p.bypass_apps // [])[]
                     | {actor_id: $apps[.], actor_type: "Integration", bypass_mode: "pull_request"} ],
                   rules: (
@@ -170,7 +189,9 @@ jobs:
           # Does the ruleset GitHub holds ($2) enforce everything the policy
           # asks for ($1)? GitHub adds defaults of its own to what it returns,
           # so this compares only the fields the policy sets, rather than whole
-          # objects, which would never match.
+          # objects, which would never match. Conditions are compared in full,
+          # including `exclude` and any extra condition (a repository property
+          # filter, say) that would narrow which repositories are covered.
           ruleset_matches() {
             jq -n --argjson want "$1" --argjson have "$2" '
               def checks: map({context, integration_id}) | sort_by(.context, .integration_id);
@@ -184,16 +205,123 @@ jobs:
                         | if $k == "required_status_checks" then ($v | checks) == (($hv // []) | checks)
                           elif ($v | type) == "array" then ($v | sort) == (($hv // []) | sort)
                           else $v == $hv end));
+              def cond_ok($c):
+                (($want.conditions[$c].include // []) | sort) == (($have.conditions[$c].include // []) | sort)
+                and (($want.conditions[$c].exclude // []) | sort) == (($have.conditions[$c].exclude // []) | sort);
               $want.enforcement == $have.enforcement
               and $want.target == $have.target
-              and ($want.conditions.ref_name.include | sort) == (($have.conditions.ref_name.include // []) | sort)
-              and ($want.conditions.ref_name.exclude | sort) == (($have.conditions.ref_name.exclude // []) | sort)
+              and ($want.conditions | keys) == (($have.conditions // {}) | with_entries(select(.value != null)) | keys)
+              and ($want.conditions | keys | all(cond_ok(.)))
               and ($want.bypass_actors | actors) == (($have.bypass_actors // []) | actors)
               and ($want.rules | map(.type) | sort) == (($have.rules // []) | map(.type) | sort)
               and ($want.rules | all(rule_ok($have.rules // [])))'
           }
 
+          # Why GitHub refused an organisation-level call, from gh's error
+          # output. Prints PLAN-BLOCKED, NEEDS-ORG-ADMIN, or nothing for a
+          # refusal that is a real failure.
+          org_refusal() {
+            if grep -q "Upgrade to GitHub" <<< "$1"; then
+              echo PLAN-BLOCKED
+            elif grep -qE "HTTP 40[34]" <<< "$1"; then
+              echo NEEDS-ORG-ADMIN
+            fi
+          }
+
           total=0; changed=0; failed=0; blocked=0
+          org_drift=0
+          # ruleset name -> "1" once read back from GitHub active and matching.
+          # Only these may retire their repository-level copies.
+          declare -A verified=()
+          declare -A org_status=()
+
+          # --- organisation rulesets ----------------------------------------
+          # Created if missing, updated if it differs from the policy, then read
+          # back, because a 2xx is not evidence.
+          echo "--- organisation rulesets"
+          if ! org_list=$(gh api "orgs/${ORG}/rulesets?per_page=100" 2>&1); then
+            why=$(org_refusal "${org_list}")
+            if [ -z "${why}" ]; then
+              echo "::warning::could not list organisation rulesets: ${org_list}"
+              failed=$((failed + 1))
+              why=FAILED
+            else
+              blocked=$((blocked + 1))
+            fi
+            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
+              org_status[${rs}]="${why}"
+              echo "blocked   org ruleset ${rs}: ${why}"
+            done
+            if [ "${why}" = NEEDS-ORG-ADMIN ]; then
+              echo "::warning title=NEEDS-ORG-ADMIN::ORG_ADMIN_TOKEN cannot manage organisation rulesets. Grant it the organisation permission \"Administration: read and write\", or create them once by hand (Settings > Rules > Rulesets) to match settings.yml. Repository settings are still reconciled."
+            fi
+          else
+            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
+              want=$(build_ruleset "${rs}" "$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')")
+              rs_id=$(echo "${org_list}" | jq -r --arg n "${rs}" '[.[] | select(.name == $n)][0].id // empty')
+
+              if [ -n "${rs_id}" ]; then
+                have=$(gh api "orgs/${ORG}/rulesets/${rs_id}")
+                if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
+                  org_status[${rs}]="ok"
+                  echo "ok        org ruleset ${rs} ($(echo "${want}" | jq -r .enforcement))"
+                  if [ "$(echo "${want}" | jq -r .enforcement)" = active ]; then verified[${rs}]=1; fi
+                  continue
+                fi
+                verb=PUT; path="orgs/${ORG}/rulesets/${rs_id}"; action=update
+              else
+                verb=POST; path="orgs/${ORG}/rulesets"; action=create
+              fi
+              org_drift=$((org_drift + 1))
+
+              if [ "${DRY_RUN}" = "true" ]; then
+                org_status[${rs}]="would ${action}"
+                echo "drift     org ruleset ${rs}: ${action}"
+                continue
+              fi
+
+              if ! out=$(echo "${want}" | gh api -X "${verb}" "${path}" --input - 2>&1); then
+                why=$(org_refusal "${out}")
+                if [ -n "${why}" ]; then
+                  org_status[${rs}]="${why}"
+                  echo "drift     org ruleset ${rs}: ${action}(${why})"
+                  blocked=$((blocked + 1))
+                else
+                  org_status[${rs}]="FAILED"
+                  echo "::warning::could not ${action} org ruleset ${rs}: ${out}"
+                  failed=$((failed + 1))
+                fi
+                continue
+              fi
+              # READ BACK what GitHub now holds, and check it enforces what
+              # was asked.
+              rs_id=$(echo "${out}" | jq -r '.id')
+              have=$(gh api "orgs/${ORG}/rulesets/${rs_id}")
+              if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
+                org_status[${rs}]="${action}d"
+                echo "drift     org ruleset ${rs}: ${action}"
+                echo "  applied   org ruleset ${rs}"
+                if [ "$(echo "${want}" | jq -r .enforcement)" = active ]; then verified[${rs}]=1; fi
+              else
+                org_status[${rs}]="NOT-APPLIED"
+                echo "::warning::org ruleset ${rs} was accepted but does not match the policy"
+                failed=$((failed + 1))
+              fi
+            done
+          fi
+
+          # Repository rulesets to retire: only those whose org ruleset asked
+          # for it AND was verified above. Anything else stays where it is.
+          RETIRE=""
+          for rs in $(echo "${RULESETS}" | jq -r 'to_entries[] | select(.value.retire_repo_rulesets == true) | .key'); do
+            if [ -n "${verified[${rs}]:-}" ]; then
+              RETIRE="${RETIRE} ${rs}"
+            else
+              echo "info      repository rulesets named ${rs} are kept: the org ruleset is not verified active on this run"
+            fi
+          done
+          echo
+          echo "--- repositories"
 
           # $1 verb, $2 path, $3 label. Warns rather than stopping: one repo
           # refusing a write must not hide the other nineteen.
@@ -271,68 +399,44 @@ jobs:
               --jq '.security_and_analysis.secret_scanning.status // "unavailable"' 2>/dev/null || echo unavailable)
             [ "${ss}" = "enabled" ] || note="${note} secretscanning:${ss}"
 
-            # --- rulesets (the merge gate) ---------------------------------
-            # Created if missing, replaced if it differs from the policy, then
-            # read back, because a 2xx is not evidence. A Free-plan private
-            # repository refuses rulesets outright; that is PLAN-BLOCKED, not
-            # a failure, for the same reason as a plan-refused merge setting.
-            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
-              pol=$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')
-              # A pilot: while `only_repos` is set, other repositories are left alone.
-              if [ "$(echo "${pol}" | jq --arg r "${repo#*/}" 'has("only_repos") and ((.only_repos | index($r)) == null)')" = "true" ]; then
+            # --- legacy repository rulesets -------------------------------
+            # Deleted only by exact name, only when the org ruleset of that
+            # name was verified above, and only when this repository itself
+            # lists that org ruleset as applying to it. A repository ruleset
+            # with any other name is never touched.
+            for rs in ${RETIRE}; do
+              if ! list=$(gh api "repos/${repo}/rulesets?includes_parents=true&per_page=100" 2>&1); then
+                # A plan that refuses rulesets cannot hold a copy to retire.
+                grep -q "Upgrade to GitHub" <<< "${list}" && continue
+                echo "::warning::could not list rulesets on ${repo}: ${list}"
+                failed=$((failed + 1))
                 continue
               fi
-              want=$(build_ruleset "${rs}" "${repo#*/}" "${pol}")
-              # A repo with no CI checks declared is a known policy state, not drift:
-              # reported on every run, but not counted.
-              if [ "$(echo "${pol}" | jq --arg r "${repo#*/}" '.required_checks.per_repo | has($r)')" != "true" ]; then
-                echo "info      ${repo}: ruleset:${rs}:no-ci-checks"
-              fi
-
-              if ! list=$(gh api "repos/${repo}/rulesets?includes_parents=false&per_page=100" 2>&1); then
-                if grep -q "Upgrade to GitHub" <<< "${list}"; then
-                  note="${note} ruleset:${rs}:PLAN-BLOCKED"
-                  blocked=$((blocked + 1))
-                else
-                  echo "::warning::could not list rulesets on ${repo}: ${list}"
-                  failed=$((failed + 1))
-                fi
+              legacy=$(echo "${list}" | jq -r --arg n "${rs}" \
+                '[.[] | select(.name == $n and .source_type == "Repository") | .id] | map(tostring) | join(" ")')
+              [ -n "${legacy}" ] || continue
+              if [ "$(echo "${list}" | jq --arg n "${rs}" 'any(.[]; .name == $n and .source_type == "Organization")')" != "true" ]; then
+                echo "info      ${repo}: repository ruleset ${rs} kept: the org ruleset is not listed as applying here"
                 continue
               fi
-              rs_id=$(echo "${list}" | jq -r --arg n "${rs}" '[.[] | select(.name == $n and .source_type == "Repository")][0].id // empty')
-
-              if [ -n "${rs_id}" ]; then
-                have=$(gh api "repos/${repo}/rulesets/${rs_id}")
-                if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
-                  continue
-                fi
-                verb=PUT; path="repos/${repo}/rulesets/${rs_id}"; note="${note} ruleset:${rs}:update"
-              else
-                verb=POST; path="repos/${repo}/rulesets"; note="${note} ruleset:${rs}:create"
-              fi
+              note="${note} legacy-ruleset:${rs}:retire"
               if [ "${DRY_RUN}" = "true" ]; then
                 continue
               fi
-
-              if ! out=$(echo "${want}" | gh api -X "${verb}" "${path}" --input - 2>&1); then
-                if grep -q "Upgrade to GitHub" <<< "${out}"; then
-                  note="${note}(PLAN-BLOCKED)"
-                  blocked=$((blocked + 1))
-                else
-                  echo "::warning::could not ${verb} ruleset ${rs} on ${repo}: ${out}"
+              for id in ${legacy}; do
+                if ! gh api -X DELETE "repos/${repo}/rulesets/${id}" --silent 2>/dev/null; then
+                  echo "::warning::could not delete repository ruleset ${rs} (${id}) on ${repo}"
                   failed=$((failed + 1))
                 fi
-                continue
-              fi
-              # READ BACK what GitHub now holds, and check it enforces what
-              # was asked.
-              rs_id=$(echo "${out}" | jq -r '.id')
-              have=$(gh api "repos/${repo}/rulesets/${rs_id}")
-              if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
-                echo "  applied   ruleset ${rs}"
+              done
+              # READ BACK: the copy must actually be gone.
+              left=$(gh api "repos/${repo}/rulesets?includes_parents=false&per_page=100" 2>/dev/null \
+                | jq --arg n "${rs}" '[.[] | select(.name == $n and .source_type == "Repository")] | length') || left=unknown
+              if [ "${left}" = "0" ]; then
+                echo "  applied   retired repository ruleset ${rs}"
               else
                 note="${note}(NOT-APPLIED)"
-                echo "::warning::ruleset ${rs} on ${repo} was accepted but does not match the policy"
+                echo "::warning::repository ruleset ${rs} on ${repo} is still present after delete"
                 failed=$((failed + 1))
               fi
             done
@@ -341,12 +445,12 @@ jobs:
               echo "ok        ${repo}"
             else
               changed=$((changed + 1))
-              echo "drift     ${repo}: ${note}"
+              echo "drift     ${repo}: ${note# }"
             fi
           done <<< "${repos}"
 
           echo
-          echo "${total} repositories, ${changed} drifted, ${failed} could not be written, ${blocked} had keys the plan refuses"
+          echo "${total} repositories, ${changed} drifted, ${org_drift} org rulesets drifted, ${failed} could not be written, ${blocked} refused by plan or token"
           {
             echo "### Repository policy reconcile"
             echo
@@ -356,15 +460,22 @@ jobs:
             echo "- repositories: ${total}"
             echo "- drifted: ${changed}"
             echo "- failed to write: ${failed}"
-            echo "- keys silently refused by GitHub: ${blocked}"
+            echo "- refused by the plan or the token: ${blocked}"
+            echo
+            echo "| Org ruleset | State |"
+            echo "|---|---|"
+            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
+              echo "| \`${rs}\` | ${org_status[${rs}]:-unknown} |"
+            done
             echo
             echo "Policy source: \`settings.yml\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
           # A run that could not write what it found is not a success. A key
-          # the PLAN forbids is different: no token can change it, and failing
-          # nightly over it would make this permanently red, which is how a
-          # check stops being read. Reported loudly, not fatal.
+          # the PLAN forbids, or an org ruleset the token may not manage, is
+          # different: no run of this job can change it, and failing nightly
+          # over it would make this permanently red, which is how a check
+          # stops being read. Reported loudly, not fatal.
           if [ "${failed}" -gt 0 ] && [ "${DRY_RUN}" != "true" ]; then
             exit 1
           fi

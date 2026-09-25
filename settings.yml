@@ -1,8 +1,9 @@
 # The org's repository policy, in one reviewable place.
 #
-# Applied to every non-archived repository by
-# .github/workflows/repo-settings-reconcile.yml -- on a push to this file,
-# nightly, and on demand.
+# Applied by .github/workflows/repo-settings-reconcile.yml -- on a push to
+# this file, nightly, and on demand. `repository` and `security` are written
+# into every non-archived repository; `org_rulesets` are written once, to the
+# organisation.
 #
 # The shape here is deliberately the one github-community-projects/safe-settings
 # consumes. If this org ever outgrows sixty lines of bash, this file migrates
@@ -25,6 +26,8 @@ repository:
   #
   # It stays declared on purpose. This file is the statement of intent, and
   # the day the org moves plan the next run applies it with no edit needed.
+  # The org moved to Team on 2026-09-25, and review-gate below is what keeps
+  # auto-merge from merging a pull request the moment CI is green.
   allow_auto_merge: true
   allow_squash_merge: true
 
@@ -68,44 +71,58 @@ maintenance:
   # Off by default. Turn it on deliberately, and watch one dry run first.
   prune_merged_branches: false
 
-rulesets:
-  # THE MERGE GATE. Nothing reaches a default branch without a reviewed pull
-  # request: CodeRabbit has reviewed and approved the latest commit, every
-  # review conversation is resolved, and CI is green. Nobody bypasses it --
-  # not an admin, and not an agent working with an admin's token. That second
-  # case is the one that happened: on 2026-09-25 two evidence-reply PRs were
-  # merged by an agent while CodeRabbit's status still read "Review in
-  # progress", and the review was abandoned. Nothing stopped it, because
-  # nothing here could.
+org_rulesets:
+  # ORGANISATION rulesets, written once to the org rather than into each
+  # repository. They name no repository: `~ALL` covers every repository the
+  # org has now and every one it creates later, with no edit here. This file
+  # knows the policy, never the repositories it applies to.
   #
-  # WHY PER-REPOSITORY RULESETS, not one org ruleset. Written by this file into
-  # every repository, a ruleset works the same way on the org and on a personal
-  # account, which has no account-level rulesets at all. GitHub's own docs also
-  # disagree about which plan gets org-level rulesets. A per-repo ruleset needs
-  # only Pro or Team.
+  # NEEDS GITHUB TEAM, which the org has been on since 2026-09-25. On a plan
+  # without organisation rulesets the reconciler reports PLAN-BLOCKED rather
+  # than failing, like allow_auto_merge above.
   #
-  # NEEDS GITHUB TEAM (or Pro) for private repositories. On Free, GitHub refuses
-  # rulesets outright ("Upgrade to GitHub Pro or make this repository public").
-  # The org moved to Team on 2026-09-25. On a plan that can't hold rulesets,
-  # the reconciler reports PLAN-BLOCKED rather than failing, like
-  # allow_auto_merge above.
+  # NEEDS AN ORG PERMISSION. Writing these takes the organisation permission
+  # "Administration: read and write" on ORG_ADMIN_TOKEN, which is more than
+  # the repository Administration the rest of this file needs. Without it
+  # the reconciler reports NEEDS-ORG-ADMIN, leaves these alone, and carries
+  # on with the repository settings above.
+  #
+  # Keys, per ruleset:
+  # - enforcement: active | disabled.
+  # - repositories / branches: the `include` lists. `exclude` is always
+  #   empty, and the reconciler repairs any exclusion added by hand, because
+  #   an excluded default branch is a gate switched off.
+  # - bypass_apps: GitHub App slugs, resolved to IDs at run time, allowed to
+  #   merge their own pull requests past the ruleset (`pull_request` mode:
+  #   never a direct push).
+  # - pull_request: the pull_request rule's parameters, as the rulesets API
+  #   takes them.
+  # - required_checks: `strict` (the branch must be up to date) and `checks`,
+  #   each a check name plus the app slug that must post it.
+  # - block_force_push / block_deletion.
+  # - retire_repo_rulesets: once this org ruleset is read back active and
+  #   matching, delete REPOSITORY rulesets with exactly this name from every
+  #   repository. Never any other name.
+
   review-gate:
+    # THE MERGE GATE. Nothing reaches a default branch without a reviewed
+    # pull request: CodeRabbit has approved the latest commit, every review
+    # conversation is resolved, and CodeRabbit's check is green. Nobody
+    # bypasses it -- not an admin, and not an agent working with an admin's
+    # token. That second case is the one that happened: on 2026-09-25 two
+    # evidence-reply PRs were merged by an agent while CodeRabbit's status
+    # still read "Review in progress", and the review was abandoned.
     enforcement: active
+    repositories: ["~ALL"]
     branches: ["~DEFAULT_BRANCH"]
 
-    # EVERY REPOSITORY, with no pilot list. On 2026-09-25, the evening the org
-    # moved to Team, the gate was put on all 33 repositories by hand, because
-    # the next nightly run would apply allow_auto_merge above. Auto-merge with
-    # no gate means a PR merges the moment CI is green. This file now keeps
-    # that gate in place and adds each repository's CI checks below.
-    #
-    # To pilot a future change to the gate, add `only_repos: [name, ...]`: while
-    # it exists, the ruleset is written only to the repositories it names.
+    # The same gate was put on all 33 repositories by hand on 2026-09-25, as
+    # repository rulesets named `review-gate`, the evening the org moved to
+    # Team. Those copies are deleted only once this org ruleset is verified;
+    # until then both apply, and they ask for the same thing. Remove this key
+    # once a run reports none left.
+    retire_repo_rulesets: true
 
-    # GitHub App slugs, resolved to IDs at run time. Bypass here is
-    # `pull_request` mode only: the app may merge its own pull request, never
-    # push to the branch directly.
-    #
     # Renovate, and only Renovate. CodeRabbit refuses to review pull requests
     # from bots ("Review skipped: bot user not eligible for review"), so it
     # can never approve one, and without this every dependency update would
@@ -144,12 +161,10 @@ rulesets:
       # account opens, which is every agent working with the owner's token,
       # CodeRabbit's approval is the only one that can count.
       #
-      # PROVE IT BEFORE RELYING ON IT. GitHub doesn't document whether an app's
-      # approval counts. evidence-reply #4 is the test case: `blocked` until
-      # CodeRabbit approves the head, and it should then become mergeable. If
-      # it turns out not to count, don't just drop this to 0: the CodeRabbit
-      # status goes green on a skipped, paused or rate-limited review, so the
-      # gate would no longer prove a review happened.
+      # DON'T DROP THIS TO 0. If an app's approval ever stops counting, the
+      # CodeRabbit check below can't stand in for it: its status goes green
+      # when a review is skipped, paused or rate-limited, so the gate would
+      # no longer prove a review happened.
       required_approving_review_count: 1
       # A push after approval drops it, so the approval always covers the
       # code that merges.
@@ -163,55 +178,40 @@ rulesets:
       # The branch must be up to date with its base before merging, so the
       # green checks describe the code that actually lands.
       strict: true
-
-      # Required everywhere, and pinned to the app that must post it: a
-      # workflow cannot satisfy it by posting its own status named
-      # "CodeRabbit". This status alone is NOT proof of review, because
-      # CodeRabbit marks it success even when it skipped or was rate limited.
-      # The approval above is the proof. This check makes the merge wait
-      # while a review is still running.
-      everywhere:
+      checks:
+        # Pinned to the app that must post it: a workflow cannot satisfy it by
+        # posting its own status named "CodeRabbit". This status alone is NOT
+        # proof of review, because CodeRabbit marks it success even when it
+        # skipped, paused or was rate-limited. The approval above is the
+        # proof. This check makes the merge wait while a review is running.
         - context: CodeRabbit
           app: coderabbitai
-
-      # Each repository's CI, by exact check-run name, all from GitHub Actions.
-      # Names are copied from real pull-request runs, or from the shared
-      # reusable workflows, where the name is "<caller job> / <job name>".
-      #
-      # Left out on purpose, because requiring them would block pull requests
-      # forever or add nothing:
-      # - advisory checks that pass whatever they find: `security / Ecosystem
-      #   audit`, `ci / Lint` with lint-strict off, Lighthouse, shellcheck;
-      # - checks that are always skipped on a pull request (`ci / Typecheck`
-      #   when typecheck is off, and agent-pipeline's jobs);
-      # - checks that only run when certain paths change (`actionlint /
-      #   actionlint` in consuming repositories): if one is required, any
-      #   other pull request waits forever for a check that never starts.
-      #
-      # A repository missing from this list gets the review gate but no CI
-      # requirement, and the reconciler reports it as `no-ci-checks`.
-      per_repo:
-        .github: ["actionlint", "Renovate presets"]
-        agent-egress-proxy: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
-        agent-egress-proxy-clean: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
-        agent-os: ["test"]
-        ai-influencer-engine: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
-        coolify-mcp-oauth: ["image", "Privilege drop and volume adoption"]
-        cymatics-engine: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
-        drillwright: ["checks"]
-        evidence-reply: ["image"]
-        grit: ["ci / Verify", "Guard the sandbox claim", "security / Secrets", "security / Vulnerable dependencies"]
-        quarterdeck: ["Lint · Typecheck · Build · Test", "security / Secrets", "security / Vulnerable dependencies"]
-        tankster-ai-public: ["Lint · Typecheck · Build", "security / Secrets", "security / Vulnerable dependencies"]
-        tankster-books: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
-        tankster-core: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies", "no unresolved review threads"]
-        tankster-infra: ["validate", "security / Secrets", "security / Vulnerable dependencies"]
-        tankster-scribe: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
-        tankster-seed: ["ci / Verify", "security / Secrets", "security / Vulnerable dependencies"]
 
     # No force-pushes and no deleting the default branch.
     block_force_push: true
     block_deletion: true
+
+  ci-gate:
+    # GREEN CI, without this file knowing any repository's job names. Each
+    # repository publishes ONE check, `ci-gate`, from a top-level job in its
+    # own CI workflow that passes only when all of that repository's CI jobs
+    # passed. The contract, and the job to copy, are in the README under
+    # "The `ci-gate` contract".
+    #
+    # DISABLED FOR NOW, on purpose. Required but never reported, a check
+    # blocks every pull request forever, and repositories are adopting
+    # `ci-gate` in their own pull requests. This flips to `active` in a
+    # reviewed pull request once every repository's CI publishes `ci-gate`.
+    enforcement: disabled
+    repositories: ["~ALL"]
+    branches: ["~DEFAULT_BRANCH"]
+
+    required_checks:
+      strict: true
+      checks:
+        # Pinned to GitHub Actions, so only a workflow run can satisfy it.
+        - context: ci-gate
+          app: github-actions
 
 # Version updates are deliberately absent, and no dependabot.yml is shipped:
 # that would duplicate Renovate outright and put two changelogs on every bump.

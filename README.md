@@ -110,25 +110,45 @@ opened to merged with no human review, by default, org-wide:
    moment it's opened (unless it carries `needs-human-review`).
 4. **The review gate** is what actually lets GitHub complete the merge.
    Neither workflow above ever calls merge itself. The gate is the
-   `review-gate` ruleset declared in `settings.yml`, which
-   `repo-settings-reconcile.yml` writes into every repository. It requires:
-   - CodeRabbit's approval of the latest commit;
+   `review-gate` **organisation ruleset** declared under `org_rulesets:` in
+   `settings.yml`, which `repo-settings-reconcile.yml` writes once, to the
+   org. It targets every repository (`~ALL`) on its default branch, so a new
+   repository is covered the moment it exists, and neither file names a
+   repository. It requires:
+   - one approval, dismissed by any later push. In practice that is
+     CodeRabbit's approval of the latest commit;
    - every review conversation resolved;
-   - the `CodeRabbit` status plus the repo's CI checks green, on a branch that
-     is up to date with its base;
+   - the `CodeRabbit` check green, pinned to the CodeRabbit app, on a branch
+     that is up to date with its base;
+   - squash merges only, no force-push, no deleting the branch;
    - no bypass for people, admins included. Only Renovate may merge its own
-     PRs past it, because CodeRabbit won't review bot PRs. That works only
-     when Renovate merges directly as itself (`platformAutomerge: false` in
-     `default.json`), which is why `auto-merge-gate.yml` skips bot PRs.
+     PRs past it, in `pull_request` mode, because CodeRabbit won't review bot
+     PRs. That works only when Renovate merges directly as itself
+     (`platformAutomerge: false` in `default.json`), which is why
+     `auto-merge-gate.yml` skips bot PRs.
 
-   Private repositories need GitHub Team for this; the org has been on Team
-   since 2026-09-25. On a plan that can't hold rulesets, the reconciler
-   reports `PLAN-BLOCKED`. An agent working with an
-   admin's token can't merge past an active gate, but that token can still
-   edit or delete the ruleset itself. The reconciler puts it back on its next
-   run, not instantly, so keep admin tokens away from agents where you can.
-   The gate exists because on 2026-09-25 an agent merged two PRs while
-   CodeRabbit's review was still running.
+   A green `CodeRabbit` check is not proof of a review: it goes green when a
+   review is skipped, paused or rate-limited. The approval is the proof,
+   which is why the approval count must never drop to 0.
+
+   A second organisation ruleset, `ci-gate`, requires one check named
+   `ci-gate` from GitHub Actions. It is declared `enforcement: disabled` until
+   every repository publishes that check (see "The `ci-gate` contract"
+   below), then flipped to `active` in a reviewed PR.
+
+   **Rollout.** On 2026-09-25, the day the org moved to GitHub Team, the same
+   gate was put on all 33 repositories by hand as repository rulesets named
+   `review-gate`. Once the org ruleset has been read back active and
+   matching, and each repository lists it as applying there, the reconciler
+   deletes those per-repository copies (and nothing with any other name).
+   Until then both apply, and they ask for the same thing.
+
+   **Token.** Organisation rulesets need `ORG_ADMIN_TOKEN` to carry the
+   organisation permission "Administration: read and write". Without it the
+   reconciler reports `NEEDS-ORG-ADMIN`, leaves the org rulesets and the
+   per-repository copies alone, and still reconciles every repository's
+   settings. On a plan without organisation rulesets it reports
+   `PLAN-BLOCKED`.
 
 Requires, at the organisation level (not reproducible by a workflow file,
 so done once by hand): the Claude GitHub App installed org-wide; **either**
@@ -185,6 +205,85 @@ jobs:
     if: github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","ready_for_review","labeled","unlabeled"]'), github.event.action)
     uses: TanksterAI/.github/.github/workflows/auto-merge-gate.yml@v1
 ```
+
+## The `ci-gate` contract
+
+A ruleset can only require a check by its exact name, and every repository
+names its CI jobs differently. Listing each repository's job names here would
+make this repository depend on every other one, and every new repository
+would need an edit here. So the org-wide `ci-gate` ruleset requires one
+conventionally named check, `ci-gate`, and knows nothing else. Each
+repository implements it with one job in its own CI workflow that passes only
+when all of that repository's CI jobs passed.
+
+Add this job to the workflow that holds the repository's CI jobs, usually
+`.github/workflows/ci.yml`:
+
+```yaml
+  # The one check the org-wide `ci-gate` ruleset requires. It passes only when every
+  # CI job listed in `needs` succeeded or was deliberately skipped, so the org rule
+  # never needs to know this repo's job names. Add new CI jobs to `needs`.
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs: [<every CI job in this workflow>]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: All required CI jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null \
+            || { echo "::error::A required CI job failed or was cancelled:"; echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'; exit 1; }
+```
+
+- **Top level, in the repository's own workflow.** The job id and `name:` must
+  both be exactly `ci-gate`. It can't live in a reusable workflow here: a job
+  inside a called workflow reports its check as `<caller job> / <job name>`
+  (for example `ci / ci-gate`), so it would never match the required name.
+- **`needs` lists the CI jobs**: lint, typecheck, test, build, security,
+  including jobs that call reusable workflows (`needs: [ci, security]`).
+- **Leave out** bot and agent jobs (`address-feedback`, `auto-merge-gate`),
+  advisory jobs allowed to fail (Lighthouse and the like), and release or
+  deploy jobs that only run on main.
+- **`skipped` passes**: a job skipped by its own `if:` (a path filter, say) is
+  fine. `failure` and `cancelled` fail the gate.
+- **One workflow file.** `needs` can't cross workflow files, so if CI is split
+  across several, `ci-gate` goes in the main one and covers its jobs.
+- **Triggers.** The workflow must run on `pull_request` (and ideally `push` to
+  the default branch), so `ci-gate` reports on every PR.
+- **No CI yet?** Add a minimal `ci.yml` with the lightest honest check the
+  repository supports (markdown lint, `python -m compileall`, `cargo check`,
+  `npm ci && npm run build`) plus `ci-gate`. Never a check that always passes.
+
+This repository follows the contract: `self-check.yml` has a top-level
+`ci-gate` job that needs `actionlint` and `Renovate presets`.
+
+## What the gate does not cover
+
+Stated plainly, so nobody relies on more than is there:
+
+- **Admins can edit organisation rulesets.** An admin, or an agent holding an
+  admin's token, can't merge past an active gate, but can change or delete
+  the ruleset itself. The reconciler restores it on its next run (on a push
+  to `settings.yml`, nightly, or by hand), not instantly. Keep admin tokens
+  away from agents where you can.
+- **`@coderabbitai approve` defeats the gate.** That command makes CodeRabbit
+  approve without a review. Nothing in a ruleset can tell that approval from
+  a real one, so it must never be posted, by a person or an agent.
+- **CodeRabbit skips bot PRs.** It never reviews or approves them, which is
+  why Renovate has a bypass. Dependabot has none, so its PRs need a human
+  approval.
+- **The owner's approval counts on PRs opened by others.** A ruleset can't
+  name CodeRabbit as the required reviewer (`required_reviewers` accepts
+  teams only), so on a PR someone else opened, the owner's approval
+  satisfies the gate too. On PRs the owner's account opens, which includes
+  every agent using the owner's token, only CodeRabbit's approval can count.
+- **Personal accounts have no account-wide rulesets.** Repositories under a
+  personal account aren't covered by any of this. The plan there is to apply
+  the same ruleset body to each repository, still with no per-repository
+  data; that is a separate follow-up, not part of this reconciler.
 
 ## Security tooling, and what is deliberately absent
 

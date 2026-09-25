@@ -92,3 +92,21 @@ jobs:
           # up to the next literal `"`, which an escaped `\"` isn't.
           done < <(grep -hoE 'github>[A-Za-z0-9._/-]+(:[A-Za-z0-9_-]+)?' ./*.json | sort -u)
           exit $fail
+
+  # The one check the org-wide `ci-gate` ruleset requires. It passes only when every
+  # CI job listed in `needs` succeeded or was deliberately skipped, so the org rule
+  # never needs to know this repo's job names. Add new CI jobs to `needs`.
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs: [actionlint, presets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: All required CI jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null \
+            || { echo "::error::A required CI job failed or was cancelled:"; echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'; exit 1; }
