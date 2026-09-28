@@ -24,9 +24,14 @@ permissions: {}
 jobs:
   move:
     name: Move tag
+    # One move per tag at a time, so each run's "old -> new" summary is true.
+    concurrency:
+      group: move-major-tag-${{ inputs.tag }}
+      cancel-in-progress: false
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
+      # Writing refs/tags/* is a contents write.
       contents: write
     steps:
       - name: Move
@@ -34,7 +39,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
-          SHA: ${{ inputs.sha }}
+          WANT: ${{ inputs.sha }}
         run: |
           set -euo pipefail
 
@@ -43,8 +48,12 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${SHA}" ]; then
-            SHA=$(gh api "repos/${REPO}/commits/main" --jq .sha)
+          # Always resolve to a full commit SHA: the input may be a short SHA
+          # or a ref name, and the refs API documents only full SHAs.
+          SHA=$(gh api "repos/${REPO}/commits/${WANT:-main}" --jq .sha)
+          if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve '${WANT:-main}' to a commit."
+            exit 1
           fi
 
           # A major tag only ever points at something that is on main, so a
