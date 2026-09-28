@@ -37,7 +37,7 @@ permissions: {}
 jobs:
   prune:
     name: Prune merged branches
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     # Same defect repo-settings-reconcile.yml hit on 2026-09-01: `permissions:
     # {}` above sets every scope to none, so checkout cannot read this private

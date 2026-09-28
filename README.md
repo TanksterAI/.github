@@ -62,6 +62,20 @@ Every job sets `timeout-minutes` and a least-privilege `permissions` block.
 Callers still need their own `permissions` block, because the caller's grant is
 the ceiling for everything it calls.
 
+### Where jobs run
+
+Every job here runs on `${{ vars.CI_RUNNER || 'ubuntu-latest' }}`, and the
+reusable workflows' `runs-on` input defaults to the same. `CI_RUNNER` is an
+organisation variable: `ubuntu-latest` while the organisation's included
+Actions minutes last, and `tankster-gcb` -- one-job runners on Google Cloud
+Build's free tier -- once they run out. A dispatcher flips it automatically
+and flips it back when the minutes reset; how that works, and what differs on
+those runners, is in `ci/fallback-runner/README.md` in `tankster-infra`.
+
+A consuming repo's own inline jobs should use the same expression, so the
+whole estate moves together. Passing `runs-on` explicitly still pins a job to
+one runner.
+
 ### Advisory-first inputs
 
 `python-ci.yml` takes `lint-strict`, `security.yml` takes `audit-strict`,
@@ -208,8 +222,8 @@ A change here lands on every consuming repo at once. Treat it accordingly:
 1. Open a PR. `workflows-lint.yml` runs actionlint over the change.
 2. Test against one consuming repo by pinning it to the branch
    (`@my-branch` instead of `@v1`) and watching a real run go green.
-3. Merge, then move the `v1` tag:
-   `git tag -f v1 && git push -f origin v1`.
+3. Merge, then move the `v1` tag: run the `move-major-tag` workflow, or by
+   hand `git tag -f v1 && git push -f origin v1`.
 
 ## Visibility
 

@@ -58,7 +58,7 @@ permissions: {}
 jobs:
   reconcile:
     name: Reconcile repository policy
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     # REQUIRED, and its absence was a live defect. `permissions: {}` above sets
     # every scope to none, so actions/checkout could not read this PRIVATE
@@ -94,7 +94,8 @@ jobs:
           POLICY=settings.yml
           [ -f "${POLICY}" ] || { echo "::error::${POLICY} is missing"; exit 1; }
 
-          # yq ships on ubuntu-latest. Fail loudly rather than silently skipping.
+          # yq ships on ubuntu-latest and in the fallback runner's image. Fail
+          # loudly rather than silently skipping.
           command -v yq >/dev/null || { echo "::error::yq not found on runner"; exit 1; }
 
           DESIRED=$(yq -o=json '.repository' "${POLICY}")

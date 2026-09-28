@@ -18,8 +18,13 @@ on:
         type: string
         default: none
       runs-on:
+        description: >-
+          Runner label. Empty (the default) follows the organisation's
+          CI_RUNNER variable, which moves CI onto the Cloud Build fallback
+          runner when the included Actions minutes run out, and means
+          ubuntu-latest when that variable is unset.
         type: string
-        default: ubuntu-latest
+        default: ""
       osv:
         type: boolean
         default: true
@@ -69,7 +74,7 @@ jobs:
   dependencies:
     name: Vulnerable dependencies
     if: inputs.osv
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -87,7 +92,7 @@ jobs:
   secrets:
     name: Secrets
     if: inputs.gitleaks
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -125,7 +130,7 @@ jobs:
   audit:
     name: Ecosystem audit
     if: inputs.ecosystem != 'none'
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
