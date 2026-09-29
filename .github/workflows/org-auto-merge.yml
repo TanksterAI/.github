@@ -20,7 +20,7 @@
 # and says why. Until the org `ci-gate` ruleset is active, most repositories
 # fail this test on purpose.
 #
-# NEVER BLOCKS A MERGE. Every path exits 0: a draft, a bot's pull request
+# NEVER BLOCKS A MERGE. Every path exits 0: a draft, a fork, a bot's pull request
 # (Renovate merges its own), the `needs-human-review` label, an ungated base
 # branch, an API error. Being required means it must pass, so failing here
 # would block the pull request for a reason that has nothing to do with the
@@ -43,13 +43,22 @@
 #
 # SECURITY. It never checks out or runs the pull request's code. The only
 # code here is this file, taken from this repository's main branch, which
-# the review gate protects like any other.
+# the review gate protects like any other. Pull requests from forks are never
+# armed: GitHub gives their runs a read-only GITHUB_TOKEN, and handing them a
+# write credential would expose it to code nobody here reviewed.
 name: auto-merge
 
 on:
   pull_request:
 
 permissions: {}
+
+# One run per pull request at a time, queued rather than cancelled: this run
+# is a required check, and a cancelled one would hold the merge until the
+# next push.
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
   arm:
@@ -81,6 +90,7 @@ jobs:
           TOKEN_KIND: ${{ steps.app.outputs.token && 'merge App' || 'GITHUB_TOKEN' }}
           PR: ${{ github.event.pull_request.html_url }}
           REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE: ${{ github.event.pull_request.base.ref }}
           STATE: ${{ github.event.pull_request.state }}
           DRAFT: ${{ github.event.pull_request.draft }}
@@ -95,6 +105,7 @@ jobs:
 
           if [ "${STATE}" != open ]; then say "Not armed: the pull request is ${STATE}."; exit 0; fi
           if [ "${DRAFT}" = true ]; then say "Not armed: draft."; exit 0; fi
+          if [ "${HEAD_REPO}" != "${REPO}" ]; then say "Not armed: from a fork (${HEAD_REPO})."; exit 0; fi
           if [ "${AUTHOR_TYPE}" = Bot ]; then
             # CodeRabbit never reviews bot pull requests, so GitHub's auto-merge
             # would wait for an approval that never comes. Renovate merges its
@@ -110,7 +121,11 @@ jobs:
 
           # THE FENCE. The rules GitHub will actually enforce on the base
           # branch, from every ruleset that applies (org and repository).
-          if ! rules=$(gh api "repos/${REPO}/rules/branches/${BASE}?per_page=100" 2>&1); then
+          # A branch name is one path segment: release/1.0 goes as release%2F1.0.
+          enc=$(jq -rn --arg b "${BASE}" '$b | @uri')
+          if ! rules=$(gh api "repos/${REPO}/rules/branches/${enc}?per_page=100" 2>&1); then
+            # Can't prove the gate, so don't leave an earlier arming in place.
+            disarm
             echo "::warning::could not read the rules on ${BASE}, so auto-merge was not armed: ${rules}"
             say "Not armed: could not read the rules on ${BASE}."
             exit 0

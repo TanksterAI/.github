@@ -122,12 +122,12 @@ opened to merged with no human review, by default, org-wide:
    disputes, and pushes -- which re-triggers CI and a fresh CodeRabbit pass,
    and the cycle repeats until nothing is left to flag.
 3. **`org-auto-merge.yml`** enables `gh pr merge --auto` on the PR when it
-   is opened and on every push (unless it is a draft, a bot's PR, or carries
-   `needs-human-review`). No repository calls it: the `auto-merge` org
-   ruleset requires it, so GitHub runs it everywhere, in repositories that
-   don't exist yet too. It arms only where the base branch's rules require
-   an approval and a CI check besides CodeRabbit's, and it always passes, so
-   it can never be the reason a PR is stuck.
+   is opened and on every push (unless it is a draft, a bot's PR, a PR from
+   a fork, or carries `needs-human-review`). No repository calls it: the
+   `auto-merge` org ruleset requires it, so GitHub runs it everywhere, in
+   repositories that don't exist yet too. It arms only where the base
+   branch's rules require an approval and a CI check besides CodeRabbit's,
+   and it always passes, so it can never be the reason a PR is stuck.
 4. **The review gate** is what actually lets GitHub complete the merge.
    Neither workflow above ever calls merge itself. The gate is the
    `review-gate` **organisation ruleset** declared under `org_rulesets:` in

@@ -21,7 +21,7 @@ CI_NO_REVIEW='[{"type":"pull_request","parameters":{"required_approving_review_c
         {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"image"}]}}]'
 run() { # env overrides as args
   : > "${W}/calls"; : > "${W}/summary"
-  OUT=$(env STATE=open DRAFT=false AUTHOR_TYPE=User OPTED_OUT=false PR=https://x/pr/1 REPO=o/r BASE=main \
+  OUT=$(env STATE=open DRAFT=false AUTHOR_TYPE=User OPTED_OUT=false PR=https://x/pr/1 REPO=o/r HEAD_REPO=o/r BASE=main \
         TOKEN_KIND=GITHUB_TOKEN RULES_JSON="${GATED}" CALLS="${W}/calls" GITHUB_STEP_SUMMARY="${W}/summary" "$@" \
         bash "${W}/run.sh" 2>&1); RC=$?
 }
@@ -34,7 +34,8 @@ check "summary written"                'grep -q "Armed" "${W}/summary"'
 run RULES_JSON="${REVIEW_ONLY}";       check "review but no CI: not armed, disarmed" '[ $RC = 0 ] && ! armed && disarmed && has "CI check besides CodeRabbit (it requires: none)"'
 run RULES_JSON="${CI_NO_REVIEW}";      check "CI but no approval: not armed"         '[ $RC = 0 ] && ! armed && disarmed && has "(it requires 0)"'
 run RULES_JSON='[]';                   check "no rules at all: not armed"            '[ $RC = 0 ] && ! armed && disarmed'
-run RULES_FAIL=1;                      check "rules unreadable: not armed, exit 0"   '[ $RC = 0 ] && ! armed && has "could not read the rules"'
+run RULES_FAIL=1;                      check "rules unreadable: disarmed, not armed, exit 0" '[ $RC = 0 ] && ! armed && disarmed && has "could not read the rules"'
+run HEAD_REPO=someone/r;               check "fork: nothing called, exit 0"          '[ $RC = 0 ] && [ ! -s "${W}/calls" ] && has "from a fork"'
 run DRAFT=true;                        check "draft: nothing called"                 '[ $RC = 0 ] && [ ! -s "${W}/calls" ]'
 run AUTHOR_TYPE=Bot;                   check "bot: nothing called"                   '[ $RC = 0 ] && [ ! -s "${W}/calls" ]'
 run STATE=closed;                      check "closed: nothing called"                '[ $RC = 0 ] && [ ! -s "${W}/calls" ]'
@@ -42,5 +43,5 @@ run OPTED_OUT=true;                    check "label: disarmed, not armed"       
 run ARMED=true;                        check "already armed: no second arm"          '[ $RC = 0 ] && ! armed && has "Already armed"'
 run MERGE_FAIL=1;                      check "GitHub refuses: warning, exit 0"       '[ $RC = 0 ] && has "::warning::could not arm auto-merge" && has "Merge by hand"'
 run TOKEN_KIND="merge App";            check "App token reported"                    'has "Armed with merge App"'
-run BASE="release/2026.10";            check "base with a slash is queried as-is"    'grep -q "rules/branches/release/2026.10" "${W}/calls"'
+run BASE="release/2026.10";            check "base with a slash is sent encoded"     'grep -q "rules/branches/release%2F2026.10" "${W}/calls" && armed'
 echo; echo "${pass} passed, ${fail} failed"; rm -rf "${W}"; [ "${fail}" = 0 ]
