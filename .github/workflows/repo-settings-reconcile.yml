@@ -30,7 +30,10 @@
 # names a repository. A ruleset marked `retire_repo_rulesets` replaces the
 # repository rulesets of the same name that were put on each repository by
 # hand; those are deleted, but only after the org ruleset has been read back
-# active and matching, and only where the repository itself shows it.
+# active and matching, and only where the repository itself shows it. A
+# ruleset that requires a workflow is written only once that workflow file
+# exists and its repository shares workflows with the org, because a
+# required workflow that can't run blocks every merge it covers.
 #
 # IT ALSO NEEDS contents: read, and forgetting that cost this job every
 # scheduled run it ever had. See the per-job permissions block below.
@@ -157,14 +160,27 @@ jobs:
             id=$(gh api "apps/${slug}" --jq .id) || { echo "::error::cannot resolve GitHub App '${slug}'"; exit 1; }
             APP_IDS=$(echo "${APP_IDS}" | jq --arg s "${slug}" --argjson i "${id}" '. + {($s): $i}')
           done
-          echo "org rulesets: $(echo "${RULESETS}" | jq -r 'keys | join(", ")') | apps: $(echo "${APP_IDS}" | jq -c .)"
+
+          # Repositories named by required_workflows become numeric IDs the
+          # same way, and for the same reason: a workflow rule pointing at the
+          # wrong repository would block every merge in the org.
+          wf_repos=$(echo "${RULESETS}" | jq -r '[.[] | (.required_workflows // [])[] | .repository] | unique | .[]')
+          REPO_IDS='{}'
+          declare -A repo_private=()
+          for name in ${wf_repos}; do
+            meta=$(gh api "repos/${ORG}/${name}" --jq '{id, private}') \
+              || { echo "::error::cannot resolve repository '${ORG}/${name}' named in required_workflows"; exit 1; }
+            REPO_IDS=$(echo "${REPO_IDS}" | jq --arg n "${name}" --argjson i "$(echo "${meta}" | jq .id)" '. + {($n): $i}')
+            repo_private[${name}]=$(echo "${meta}" | jq -r .private)
+          done
+          echo "org rulesets: $(echo "${RULESETS}" | jq -r 'keys | join(", ")') | apps: $(echo "${APP_IDS}" | jq -c .) | workflow repos: $(echo "${REPO_IDS}" | jq -c .)"
           echo
 
           # One ruleset from the policy, in the shape the organisation
           # rulesets API takes. `exclude` is always empty: an exclusion added
           # by hand is a gate switched off, so it is drift to repair.
           build_ruleset() {
-            jq -n --arg name "$1" --argjson p "$2" --argjson apps "${APP_IDS}" '
+            jq -n --arg name "$1" --argjson p "$2" --argjson apps "${APP_IDS}" --argjson repos "${REPO_IDS}" '
               [ ($p.required_checks.checks // [])[]
                 | {context, integration_id: $apps[.app // "github-actions"]} ] as $checks
               | {
@@ -183,7 +199,11 @@ jobs:
                           strict_required_status_checks_policy: ($p.required_checks.strict // false),
                           required_status_checks: $checks}}] else [] end)
                     + (if $p.block_force_push then [{type: "non_fast_forward"}] else [] end)
-                    + (if $p.block_deletion then [{type: "deletion"}] else [] end))
+                    + (if $p.block_deletion then [{type: "deletion"}] else [] end)
+                    + (if (($p.required_workflows // []) | length) > 0 then [{type: "workflows", parameters: {
+                          do_not_enforce_on_create: true,
+                          workflows: [ $p.required_workflows[]
+                            | {path, repository_id: $repos[.repository], ref} ]}}] else [] end))
                 }'
           }
 
@@ -197,6 +217,7 @@ jobs:
             jq -n --argjson want "$1" --argjson have "$2" '
               def checks: map({context, integration_id}) | sort_by(.context, .integration_id);
               def actors: map({actor_id, actor_type, bypass_mode}) | sort_by(.actor_id);
+              def workflows: map({path, repository_id, ref}) | sort_by(.repository_id, .path);
               def rule_ok($rules):
                 . as $w
                 | ($rules | map(select(.type == $w.type)) | first) as $h
@@ -204,6 +225,7 @@ jobs:
                   and (($w.parameters // {}) | to_entries | all(
                         .key as $k | .value as $v | ($h.parameters // {})[$k] as $hv
                         | if $k == "required_status_checks" then ($v | checks) == (($hv // []) | checks)
+                          elif $k == "workflows" then ($v | workflows) == (($hv // []) | workflows)
                           elif ($v | type) == "array" then ($v | sort) == (($hv // []) | sort)
                           else $v == $hv end));
               def cond_ok($c):
@@ -256,6 +278,36 @@ jobs:
             echo "blocked   org ruleset $1: $2(${why})"
           }
 
+          # A required workflow that can't run blocks every merge it covers. So
+          # an active ruleset that requires one is written only when each
+          # workflow file exists at its ref, and its repository, if private,
+          # shares its workflows with the rest of the org. Prints the first
+          # problem found, or nothing.
+          workflow_unreachable() {
+            local name path ref access err
+            while IFS=$'\t' read -r name path ref; do
+              [ -n "${name}" ] || continue
+              if ! err=$(gh api "repos/${ORG}/${name}/contents/${path}?ref=${ref}" --silent 2>&1); then
+                if grep -q "HTTP 404" <<< "${err}"; then
+                  echo "${name}/${path} is not found at ${ref}"
+                else
+                  echo "could not check ${name}/${path} at ${ref}: ${err}"
+                fi
+                return 0
+              fi
+              if [ "${repo_private[${name}]}" = true ]; then
+                access=$(gh api "repos/${ORG}/${name}/actions/permissions/access" --jq .access_level 2>/dev/null) || access=unreadable
+                case "${access}" in
+                  organization|enterprise) ;;
+                  *)
+                    echo "${name} does not let the org's repositories use its workflows (Settings > Actions > General > Access: ${access})"
+                    return 0
+                    ;;
+                esac
+              fi
+            done < <(echo "$1" | jq -r '(.required_workflows // [])[] | [.repository, .path, .ref] | @tsv')
+          }
+
           # --- organisation rulesets ----------------------------------------
           # Created if missing, updated if it differs from the policy, then read
           # back, because a 2xx is not evidence.
@@ -266,7 +318,18 @@ jobs:
             done
           else
             for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
-              want=$(build_ruleset "${rs}" "$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')")
+              pol=$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')
+              want=$(build_ruleset "${rs}" "${pol}")
+              if [ "$(echo "${pol}" | jq -r .enforcement)" = active ]; then
+                problem=$(workflow_unreachable "${pol}")
+                if [ -n "${problem}" ]; then
+                  org_status[${rs}]="UNREACHABLE"
+                  failed=$((failed + 1))
+                  echo "::warning title=WORKFLOW-UNREACHABLE::org ruleset ${rs} left as it is: ${problem}. Requiring a workflow that cannot run would block every merge it covers."
+                  echo "blocked   org ruleset ${rs}: UNREACHABLE"
+                  continue
+                fi
+              fi
               rs_id=$(echo "${org_list}" | jq -r --arg n "${rs}" '[.[] | select(.name == $n)][0].id // empty')
 
               if [ -n "${rs_id}" ]; then
@@ -315,6 +378,21 @@ jobs:
               fi
             done
           fi
+          # GitHub runs a PRIVATE required workflow only on private
+          # repositories. A public repository here would wait on a workflow
+          # that never runs, so say so, by name.
+          if echo "${RULESETS}" | jq -e '[.[] | select(.enforcement == "active") | (.required_workflows // [])[] | .repository] | length > 0' >/dev/null; then
+            for name in ${wf_repos}; do
+              [ "${repo_private[${name}]}" = true ] || continue
+              public=$(gh api --paginate "orgs/${ORG}/repos?type=public&per_page=100" \
+                --jq '.[] | select(.archived == false) | .full_name' 2>/dev/null | grep . | paste -sd ' ' -) || public=""
+              if [ -n "${public}" ]; then
+                echo "::warning title=PUBLIC-REPOS::${name} is private, so its required workflows cannot run on these public repositories, and their pull requests will wait for them: ${public}. Make ${name} public, or those repositories private."
+              fi
+              break
+            done
+          fi
+
           if [ "${needs_org_admin}" = 1 ]; then
             echo "::warning title=NEEDS-ORG-ADMIN::ORG_ADMIN_TOKEN cannot manage organisation rulesets. Grant it the organisation permission \"Administration: read and write\", or create them once by hand (Settings > Rules > Rulesets) to match settings.yml. Repository settings are still reconciled."
           fi

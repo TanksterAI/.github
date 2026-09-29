@@ -10,7 +10,8 @@
 # unchanged and only the runner is thrown away.
 
 repository:
-  # auto-merge-gate.yml runs `gh pr merge --auto --squash`. All three of these
+  # org-auto-merge.yml (required on every pull request by the `auto-merge`
+  # org ruleset below) runs `gh pr merge --auto --squash`. All three of these
   # are load-bearing for that one command: without allow_auto_merge the API
   # refuses with "Resource not accessible by integration", and without
   # allow_squash_merge the --squash flag has nothing to select.
@@ -100,6 +101,13 @@ org_rulesets:
   # - required_checks: `strict` (the branch must be up to date) and `checks`,
   #   each a check name plus the app slug that must post it.
   # - block_force_push / block_deletion.
+  # - required_workflows: workflows that must run and pass on every pull
+  #   request, each a `repository` in this org (resolved to its ID at run
+  #   time), a `path` in it and the `ref` to run it from. Before writing, the
+  #   reconciler checks each file exists at that ref and that the repository
+  #   lets the org's other repositories use its workflows; if not, it writes
+  #   nothing for that ruleset, because a required workflow that can't run
+  #   blocks every merge in the org.
   # - retire_repo_rulesets: once this org ruleset is read back active and
   #   matching, delete REPOSITORY rulesets with exactly this name from every
   #   repository. Never any other name.
@@ -132,7 +140,7 @@ org_rulesets:
     # The bypass applies to the actor that performs the merge, so Renovate must
     # merge directly as itself. GitHub's native auto-merge completes the merge
     # on its own schedule, and the bypass doesn't carry over to it. That is why
-    # default.json sets platformAutomerge: false and auto-merge-gate.yml skips
+    # default.json sets platformAutomerge: false and org-auto-merge.yml skips
     # bot pull requests.
     #
     # Deliberately NOT here:
@@ -212,6 +220,65 @@ org_rulesets:
         # Pinned to GitHub Actions, so only a workflow run can satisfy it.
         - context: ci-gate
           app: github-actions
+
+  auto-merge:
+    # AUTO-MERGE ON EVERY REPOSITORY, WITH NO FILE IN ANY OF THEM. A workflow
+    # can't be switched on for the whole org, but a ruleset can require one:
+    # GitHub then runs .github/workflows/org-auto-merge.yml from this
+    # repository on every pull request in every repository, including ones
+    # created next year. That workflow turns on auto-merge for the pull
+    # request, so the merge happens by itself the moment the review gate is
+    # satisfied. It never merges anything itself.
+    #
+    # ARMED ONLY BEHIND A GATE. Before arming, the workflow reads the rules
+    # that actually apply to the pull request's base branch and arms only if
+    # they require an approval AND at least one CI check other than
+    # CodeRabbit's. Until `ci-gate` above is active, that holds only where a
+    # repository ruleset requires its own CI (evidence-reply), so auto-merge
+    # spreads exactly as fast as CI is required, and never ahead of it.
+    #
+    # NEVER BLOCKS A MERGE BY ITSELF. The workflow passes whether or not it
+    # armed anything (a draft, a bot's pull request, the `needs-human-review`
+    # label, a base branch without the gate, an API error). The worst case is
+    # the old one: merge by hand.
+    #
+    # PLAN. Requiring workflows in organisation rulesets reached GitHub Team
+    # in June 2025. If this org's plan refuses it anyway, GitHub rejects the
+    # write, so nothing is required, and the reconciler reports it:
+    # PLAN-BLOCKED when GitHub says to upgrade, FAILED for any other refusal.
+    #
+    # PRIVATE SOURCE. This repository is private, and GitHub runs a private
+    # required workflow only on private repositories. Every repository here
+    # is private today; the reconciler warns if a public one appears. Making
+    # this repository public (which the org profile needs anyway) removes the
+    # limit.
+    enforcement: active
+    repositories: ["~ALL"]
+    branches: ["~DEFAULT_BRANCH"]
+    required_workflows:
+      - repository: .github
+        path: .github/workflows/org-auto-merge.yml
+        # From main, so a reviewed change here applies everywhere at once,
+        # the same way the v1 tag does for the reusable workflows.
+        ref: refs/heads/main
+
+  long-lived-branches:
+    # delete_branch_on_merge above deletes a pull request's HEAD branch when
+    # it merges. GitHub never deletes the default branch that way, but a pull
+    # request from `develop` into `main` would take `develop` with it. This
+    # ruleset makes the long-lived branch names undeletable in every
+    # repository, whether or not they are the default, so that can't happen,
+    # by hand or by any tool. Everything else still gets cleaned up.
+    #
+    # `release/**/*` matches every branch under release/, at any depth.
+    enforcement: active
+    repositories: ["~ALL"]
+    branches:
+      - refs/heads/main
+      - refs/heads/master
+      - refs/heads/develop
+      - refs/heads/release/**/*
+    block_deletion: true
 
 # Version updates are deliberately absent, and no dependabot.yml is shipped:
 # that would duplicate Renovate outright and put two changelogs on every bump.

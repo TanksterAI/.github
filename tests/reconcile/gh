@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Mock of `gh api` for testing the reconciler. State lives in $MOCK_STATE.
+
+State shape:
+  org:   {rulesets: {id: body}, deny: 403|404|null, deny_write: 403|null,
+          deny_get: 403|500|null (GET of one ruleset),
+          plan_blocked: bool, drop_bypass: bool}
+  repos: {full_name: {settings, rulesets: {id: body}, plan_blocked, drop_bypass,
+          org_not_visible, private (default true)}}
+  source: the repository holding required workflows (TanksterAI/.github):
+          {id, private, access_level, files: [path, ...], ref, contents_denied}
+Every call is appended to $MOCK_STATE.log as "METHOD path".
+"""
+import json, os, sys, subprocess
+args = sys.argv[1:]
+assert args[0] == "api", args
+args = args[1:]
+method, jqf, inp, silent, path = "GET", None, False, False, None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "-X": method = args[i+1]; i += 2; continue
+    if a == "--jq": jqf = args[i+1]; i += 2; continue
+    if a == "--input": inp = True; i += 2; continue
+    if a == "--silent": silent = True; i += 1; continue
+    if a == "--paginate": i += 1; continue
+    path = a; i += 1
+st = json.load(open(os.environ["MOCK_STATE"]))
+log = open(os.environ["MOCK_STATE"] + ".log", "a"); log.write(f"{method} {path}\n"); log.close()
+def out(obj):
+    s = json.dumps(obj)
+    if jqf:
+        s = subprocess.run(["jq", "-r", jqf], input=s, capture_output=True, text=True, check=True).stdout.rstrip("\n")
+    if not silent: print(s)
+    sys.exit(0)
+def err(msg, code=1):
+    print(f"gh: {msg}", file=sys.stderr); sys.exit(code)
+def save(): json.dump(st, open(os.environ["MOCK_STATE"], "w"))
+def github_defaults(body):
+    # GitHub adds its own defaults; mimic that so the matcher is tested honestly
+    for rule in body.get("rules", []):
+        if rule["type"] == "workflows":
+            for w in rule["parameters"]["workflows"]:
+                w.setdefault("sha", None)
+        if rule["type"] == "pull_request":
+            rule["parameters"].setdefault("required_reviewers", [])
+            rule["parameters"].setdefault("automatic_copilot_code_review_enabled", False)
+    rn = body.get("conditions", {}).get("repository_name")
+    if rn is not None: rn.setdefault("protected", False)
+query = path.split("?")[1] if "?" in path else ""
+p = path.split("?")[0].split("/")
+if p[0] == "apps":
+    ids = {"renovate": 2740, "coderabbitai": 347564, "github-actions": 15368}
+    out({"id": ids[p[1]]}) if p[1] in ids else err("Not Found (HTTP 404)")
+
+org = st.setdefault("org", {"rulesets": {}})
+if p[0] == "orgs" and p[2] == "repos":
+    lst = [{"full_name": r, "archived": False, "private": v.get("private", True)} for r, v in st["repos"].items()]
+    if "type=public" in query: lst = [x for x in lst if not x["private"]]
+    out(lst)
+src = st.get("source", {"id": 900, "private": True, "access_level": "organization",
+                        "files": [".github/workflows/org-auto-merge.yml"], "ref": "refs/heads/main"})
+if p[0] == "repos" and "/".join(p[1:3]) == "TanksterAI/.github":
+    if len(p) == 3: out({"id": src["id"], "private": src["private"]})
+    if p[3] == "contents":
+        want = "/".join(p[4:])
+        ref = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv).get("ref")
+        if src.get("contents_denied"): err("Resource not accessible by personal access token (HTTP 403)")
+        if want in src["files"] and ref == src.get("ref", "refs/heads/main"): out({"path": want})
+        err("Not Found (HTTP 404)")
+    if p[3:6] == ["actions", "permissions", "access"]:
+        if src["access_level"] is None: err("Resource not accessible (HTTP 403)")
+        out({"access_level": src["access_level"]})
+    err(f"unhandled {method} {path}")
+if p[0] == "orgs" and p[2] == "rulesets":
+    if org.get("deny") == 403: err("Resource not accessible by personal access token (HTTP 403)")
+    if org.get("deny") == 404: err("Not Found (HTTP 404)")
+    if org.get("plan_blocked"): err("Upgrade to GitHub Team to enable this feature. (HTTP 403)")
+    rs = org["rulesets"]
+    if method == "GET" and len(p) == 3:
+        out([{"id": int(k), "name": v["name"], "source_type": "Organization", "enforcement": v["enforcement"]} for k, v in rs.items()])
+    if method == "GET":
+        if org.get("deny_get") == 403: err("Resource not accessible by personal access token (HTTP 403)")
+        if org.get("deny_get") == 500: err("Server Error (HTTP 500)")
+        if p[3] not in rs: err("Not Found (HTTP 404)")
+        out(rs[p[3]])
+    if method in ("POST", "PUT"):
+        if org.get("deny_write"): err("Resource not accessible by personal access token (HTTP 403)")
+        body = json.load(sys.stdin)
+        rid = p[3] if len(p) == 4 else str(5000 + len(rs))
+        github_defaults(body)
+        if org.get("drop_bypass"): body["bypass_actors"] = []
+        body.update({"id": int(rid), "source_type": "Organization", "source": st.get("org_name", "TanksterAI")})
+        rs[rid] = body; save(); out(body)
+    err(f"unhandled {method} {path}")
+
+repo = "/".join(p[1:3])
+if repo not in st["repos"]: err("Not Found (HTTP 404)")
+r = st["repos"][repo]
+if len(p) == 3:
+    if method == "PATCH":
+        body = json.load(sys.stdin); r["settings"].update(body); save(); out({})
+    out(r["settings"])
+if p[3] == "vulnerability-alerts": out({})
+if p[3] == "rulesets":
+    if r.get("plan_blocked"): err("Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)")
+    if len(p) == 4 and method == "GET":
+        lst = [{"id": int(k), "name": v["name"], "source_type": "Repository", "source": repo} for k, v in r["rulesets"].items()]
+        if "includes_parents=true" in query and not r.get("org_not_visible"):
+            lst += [{"id": int(k), "name": v["name"], "source_type": "Organization", "source": "TanksterAI"} for k, v in org["rulesets"].items()]
+        out(lst)
+    if method == "DELETE":
+        if r.get("deny_delete"): err("Forbidden (HTTP 403)")
+        if p[4] not in r["rulesets"]: err("Not Found (HTTP 404)")
+        del r["rulesets"][p[4]]; save(); out({})
+    if method in ("POST", "PUT"):
+        err("repository rulesets are never written by the new reconciler")
+    out(r["rulesets"][p[4]])
+err(f"unhandled {method} {path}")

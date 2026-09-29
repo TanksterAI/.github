@@ -1,5 +1,10 @@
 # Reusable auto-merge gate.
 #
+# SUPERSEDED by org-auto-merge.yml, which the `auto-merge` org ruleset in
+# settings.yml requires on every pull request in every repository, with no
+# caller. That one also checks the base branch requires an approval and CI
+# before arming; this one doesn't. Remove callers once that ruleset is live.
+#
 # Turns auto-merge on for every PR the moment it's opened, unless it carries
 # the opt-out label -- and turns it back off if that label is added later,
 # or on again if the label is removed.
@@ -39,7 +44,7 @@ permissions:
 jobs:
   gate:
     name: Set auto-merge
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.type != 'Bot'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:

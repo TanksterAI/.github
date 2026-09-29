@@ -56,7 +56,8 @@ needs to be insulated from that.
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
 | `claude-review.yml` | any | Claude posts inline line-level PR review comments -- **retired 30 Aug 2026**, no active callers; CodeRabbit Pro is now the org's sole PR reviewer (see "The agent pipeline" below). Kept in the repo, unused, in case that changes |
 | `claude-address-feedback.yml` | any | Claude reads unresolved review threads (CodeRabbit + its own), fixes, resolves, pushes |
-| `auto-merge-gate.yml` | any | Enables/disables `gh pr merge --auto` per PR based on an opt-out label; merge timing itself comes from the `review-gate` ruleset |
+| `org-auto-merge.yml` | any | **Not called by anyone.** The `auto-merge` org ruleset requires it, so GitHub runs it on every PR in every repository. Turns on auto-merge only where the base branch requires an approval and CI; never blocks, never merges itself |
+| `auto-merge-gate.yml` | any | The per-repo predecessor of `org-auto-merge.yml`: callers can drop it once the `auto-merge` org ruleset is live |
 
 Every job sets `timeout-minutes` and a least-privilege `permissions` block.
 Callers still need their own `permissions` block, because the caller's grant is
@@ -104,7 +105,7 @@ a deliberate choice, not an oversight.
 
 ## The agent pipeline
 
-`claude-address-feedback.yml` and `auto-merge-gate.yml`, together with
+`claude-address-feedback.yml` and `org-auto-merge.yml`, together with
 CodeRabbit Pro as the org's PR reviewer (installed and licensed separately
 at the organisation level -- not a workflow in this repo), let a PR go from
 opened to merged with no human review, by default, org-wide:
@@ -120,8 +121,13 @@ opened to merged with no human review, by default, org-wide:
    comments, fixes what's real, resolves the thread, replies to what it
    disputes, and pushes -- which re-triggers CI and a fresh CodeRabbit pass,
    and the cycle repeats until nothing is left to flag.
-3. **`auto-merge-gate.yml`** enables `gh pr merge --auto` on the PR the
-   moment it's opened (unless it carries `needs-human-review`).
+3. **`org-auto-merge.yml`** enables `gh pr merge --auto` on the PR when it
+   is opened and on every push (unless it is a draft, a bot's PR, or carries
+   `needs-human-review`). No repository calls it: the `auto-merge` org
+   ruleset requires it, so GitHub runs it everywhere, in repositories that
+   don't exist yet too. It arms only where the base branch's rules require
+   an approval and a CI check besides CodeRabbit's, and it always passes, so
+   it can never be the reason a PR is stuck.
 4. **The review gate** is what actually lets GitHub complete the merge.
    Neither workflow above ever calls merge itself. The gate is the
    `review-gate` **organisation ruleset** declared under `org_rulesets:` in
@@ -139,7 +145,7 @@ opened to merged with no human review, by default, org-wide:
      PRs past it, in `pull_request` mode, because CodeRabbit won't review bot
      PRs. That works only when Renovate merges directly as itself
      (`platformAutomerge: false` in `default.json`), which is why
-     `auto-merge-gate.yml` skips bot PRs.
+     `org-auto-merge.yml` skips bot PRs.
 
    A green `CodeRabbit` check is not proof of a review: it goes green when a
    review is skipped, paused or rate-limited. The approval is the proof,
@@ -149,6 +155,23 @@ opened to merged with no human review, by default, org-wide:
    `ci-gate` from GitHub Actions. It is declared `enforcement: disabled` until
    every repository publishes that check (see "The `ci-gate` contract"
    below), then flipped to `active` in a reviewed PR.
+
+   A third, `auto-merge`, is the one that requires `org-auto-merge.yml`
+   (step 3). A required workflow can't be switched on per repository; it
+   runs from this repository's `main` on every PR in the org. Before writing
+   that ruleset, the reconciler checks the file exists at `main` and that
+   this private repository lets the org's repositories use its workflows
+   (Settings > Actions > General > Access). If either fails it writes
+   nothing, reports `WORKFLOW-UNREACHABLE` and fails the run, because a
+   required workflow that can't run blocks every merge. GitHub runs a private
+   required workflow only on private repositories, so the reconciler also
+   names any public repository, which would wait for a workflow that never
+   comes.
+
+   A fourth, `long-lived-branches`, makes `main`, `master`, `develop` and
+   everything under `release/` undeletable in every repository.
+   `delete_branch_on_merge` deletes a PR's head branch when it merges, so
+   without this a PR from `develop` into `main` would take `develop` with it.
 
    **Rollout.** On 2026-09-25, the day the org moved to GitHub Team, the same
    gate was put on all 33 repositories by hand as repository rulesets named
@@ -214,11 +237,13 @@ jobs:
     secrets:
       anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
       claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-
-  auto-merge-gate:
-    if: github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","ready_for_review","labeled","unlabeled"]'), github.event.action)
-    uses: TanksterAI/.github/.github/workflows/auto-merge-gate.yml@v1
 ```
+
+Auto-merge needs no job here: `org-auto-merge.yml` runs on every PR by
+itself once the `auto-merge` org ruleset is live. Remove any
+`auto-merge-gate` job then: that older workflow arms without checking the
+base branch's rules. (tankster-core's is inert until then, because its
+`AUTO_MERGE_ENABLED` variable is unset.)
 
 ## The `ci-gate` contract
 
@@ -241,7 +266,7 @@ Add this job to the workflow that holds the repository's CI jobs, usually
     name: ci-gate
     if: always()
     needs: [<every CI job in this workflow>]
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - name: All required CI jobs passed
@@ -272,7 +297,7 @@ Add this job to the workflow that holds the repository's CI jobs, usually
   `npm ci && npm run build`) plus `ci-gate`. Never a check that always passes.
 
 This repository follows the contract: `self-check.yml` has a top-level
-`ci-gate` job that needs `actionlint` and `Renovate presets`.
+`ci-gate` job that needs `actionlint`, `Renovate presets` and `Scenario tests`.
 
 ## What the gate does not cover
 
@@ -294,6 +319,20 @@ Stated plainly, so nobody relies on more than is there:
   teams only), so on a PR someone else opened, the owner's approval
   satisfies the gate too. On PRs the owner's account opens, which includes
   every agent using the owner's token, only CodeRabbit's approval can count.
+- **Adding `needs-human-review` to an armed PR doesn't disarm it.** GitHub
+  ignores a required workflow's event filters and runs it only on opened,
+  synchronize and reopened, never on a label. Push a commit (which re-runs
+  it) or press "Disable auto-merge".
+- **PRs already open when `auto-merge` goes live wait for it.** A required
+  workflow runs on the next opened, synchronize or reopened event, so an
+  older PR shows `auto-merge / arm` as expected until you push to it, or
+  close and reopen it.
+- **A merge armed with `GITHUB_TOKEN` starts no workflows.** GitHub records
+  the merge as github-actions, and pushes made that way don't trigger
+  `on: push`. Set the org variable `MERGE_APP_CLIENT_ID` and secret
+  `MERGE_APP_PRIVATE_KEY` for a GitHub App with Contents and Pull requests
+  (read and write), and `org-auto-merge.yml` arms with that App instead, so
+  release and deploy workflows fire after an auto-merge.
 - **Personal accounts have no account-wide rulesets.** Repositories under a
   personal account aren't covered by any of this. The plan there is to apply
   the same ruleset body to each repository, still with no per-repository
@@ -338,7 +377,11 @@ as on the consuming repos, or preset resolution will fail.
 
 A change here lands on every consuming repo at once. Treat it accordingly:
 
-1. Open a PR. `workflows-lint.yml` runs actionlint over the change.
+1. Open a PR. `self-check.yml` runs actionlint over the change, and the
+   scenario tests in `tests/` against the reconciler and
+   `org-auto-merge.yml` (run them locally with `bash tests/<name>/test.sh .`;
+   they need jq, yq v4 and python3). A change to either file comes with a
+   scenario for it.
 2. Test against one consuming repo by pinning it to the branch
    (`@my-branch` instead of `@v1`) and watching a real run go green.
 3. Merge, then move the `v1` tag: run the `move-major-tag` workflow, or by
