@@ -1,0 +1,156 @@
+# Auto-merge for every pull request in the organisation, with no file in any
+# other repository.
+#
+# HOW IT RUNS. Nothing calls this workflow. The `auto-merge` organisation
+# ruleset in settings.yml REQUIRES it on the default branch of every
+# repository (`~ALL`), and GitHub then runs this file, from this repository's
+# main branch, on every pull request in every repository, including
+# repositories created later. That is the whole point: a new repository gets
+# auto-merge with nothing to copy and nothing to forget.
+#
+# WHAT IT DOES. Turns on auto-merge for the pull request. It never merges
+# anything itself: GitHub completes the merge later, and only once every rule
+# on the base branch is satisfied (CodeRabbit's approval of the latest commit,
+# resolved threads, required checks green).
+#
+# ARMED ONLY BEHIND A GATE. Before arming, it reads the rules that actually
+# apply to the base branch. It arms only if they require an approval AND at
+# least one status check other than CodeRabbit's, i.e. the repository's CI.
+# Anything less, and auto-merge would merge on a review alone, so it disarms
+# and says why. Until the org `ci-gate` ruleset is active, most repositories
+# fail this test on purpose.
+#
+# NEVER BLOCKS A MERGE. Every path exits 0: a draft, a fork, a bot's pull request
+# (Renovate merges its own), the `needs-human-review` label, an ungated base
+# branch, an API error. Being required means it must pass, so failing here
+# would block the pull request for a reason that has nothing to do with the
+# code. The worst case is the old one: merge by hand.
+#
+# WHEN IT RUNS. GitHub ignores the event filters of a required workflow
+# (`types`, `branches`, `paths`), so this runs on the default pull_request
+# events: opened, synchronize and reopened. Adding the `needs-human-review`
+# label to a pull request that is already armed does not re-run it: push a
+# commit, or press "Disable auto-merge", to disarm it.
+#
+# WHO MERGES. With the default GITHUB_TOKEN, the merge is recorded as
+# github-actions, and GitHub starts no workflows from a push made that way:
+# `on: push` to the default branch (a release or deploy job) won't fire after
+# an auto-merge. If the org variable MERGE_APP_CLIENT_ID and the secret
+# MERGE_APP_PRIVATE_KEY are set, the pull request is armed with that GitHub
+# App's token instead, and pushes from its merges start workflows as usual.
+# The App needs Contents and Pull requests (read and write) and nothing else.
+# If minting its token fails, this falls back to GITHUB_TOKEN.
+#
+# SECURITY. It never checks out or runs the pull request's code. The only
+# code here is this file, taken from this repository's main branch, which
+# the review gate protects like any other. Pull requests from forks are never
+# armed: GitHub gives their runs a read-only GITHUB_TOKEN, and handing them a
+# write credential would expose it to code nobody here reviewed.
+name: auto-merge
+
+on:
+  pull_request:
+
+permissions: {}
+
+# One run per pull request at a time, queued rather than cancelled: this run
+# is a required check, and a cancelled one would hold the merge until the
+# next push.
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  arm:
+    name: arm
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      # Enabling auto-merge is a write to the pull request, and the merge it
+      # schedules is a write to the branch.
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Mint the merge App's token (optional)
+        id: app
+        if: vars.MERGE_APP_CLIENT_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ vars.MERGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MERGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Arm or disarm auto-merge
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          TOKEN_KIND: ${{ steps.app.outputs.token && 'merge App' || 'GITHUB_TOKEN' }}
+          PR: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          STATE: ${{ github.event.pull_request.state }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          OPTED_OUT: ${{ contains(github.event.pull_request.labels.*.name, 'needs-human-review') }}
+        run: |
+          set -uo pipefail
+
+          # Every outcome is one line in the log and in the run summary.
+          say() { echo "$1"; echo "$1" >> "${GITHUB_STEP_SUMMARY}"; }
+          disarm() { gh pr merge "${PR}" --disable-auto >/dev/null 2>&1 || true; }
+
+          if [ "${STATE}" != open ]; then say "Not armed: the pull request is ${STATE}."; exit 0; fi
+          if [ "${DRAFT}" = true ]; then say "Not armed: draft."; exit 0; fi
+          if [ "${HEAD_REPO}" != "${REPO}" ]; then say "Not armed: from a fork (${HEAD_REPO})."; exit 0; fi
+          if [ "${AUTHOR_TYPE}" = Bot ]; then
+            # CodeRabbit never reviews bot pull requests, so GitHub's auto-merge
+            # would wait for an approval that never comes. Renovate merges its
+            # own, directly, as the one app the review gate lets past.
+            say "Not armed: opened by a bot."
+            exit 0
+          fi
+          if [ "${OPTED_OUT}" = true ]; then
+            disarm
+            say "Not armed: labelled needs-human-review."
+            exit 0
+          fi
+
+          # THE FENCE. The rules GitHub will actually enforce on the base
+          # branch, from every ruleset that applies (org and repository).
+          # A branch name is one path segment: release/1.0 goes as release%2F1.0.
+          enc=$(jq -rn --arg b "${BASE}" '$b | @uri')
+          if ! rules=$(gh api "repos/${REPO}/rules/branches/${enc}?per_page=100" 2>&1); then
+            # Can't prove the gate, so don't leave an earlier arming in place.
+            disarm
+            echo "::warning::could not read the rules on ${BASE}, so auto-merge was not armed: ${rules}"
+            say "Not armed: could not read the rules on ${BASE}."
+            exit 0
+          fi
+          approvals=$(jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count] | max // 0' <<< "${rules}")
+          ci=$(jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context
+                      | select(. != "CodeRabbit")] | unique | join(", ")' <<< "${rules}")
+          if [ "${approvals:-0}" -lt 1 ] || [ -z "${ci}" ]; then
+            disarm
+            say "Not armed: ${BASE} must require an approval (it requires ${approvals:-0}) and a CI check besides CodeRabbit (it requires: ${ci:-none}). Merge by hand."
+            exit 0
+          fi
+
+          if [ "$(gh pr view "${PR}" --json autoMergeRequest --jq '.autoMergeRequest != null' 2>/dev/null)" = true ]; then
+            say "Already armed. Merges once approved and green (${ci})."
+            exit 0
+          fi
+          # gh merges on the spot, rather than scheduling, when nothing is
+          # pending. Here something always is: this run, which the ruleset
+          # requires. And if every rule were already met, merging now is what
+          # auto-merge would do a moment later anyway.
+          if out=$(gh pr merge "${PR}" --auto --squash 2>&1); then
+            say "Armed with ${TOKEN_KIND}: merges once approved and green (${ci})."
+          else
+            echo "::warning::could not arm auto-merge: ${out}"
+            say "Not armed: GitHub refused (${out}). Merge by hand."
+          fi
+          exit 0

@@ -20,7 +20,20 @@
 # TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot
 # write settings on others, so this needs `ORG_ADMIN_TOKEN` -- a fine-grained
 # PAT or App installation token with Administration: write and
-# Vulnerability alerts: write on the org's repositories.
+# Vulnerability alerts: write on the org's repositories. The organisation
+# rulesets additionally need the ORGANISATION permission Administration:
+# read and write. Without that, the run reports NEEDS-ORG-ADMIN, leaves the
+# org rulesets alone, and still reconciles every repository's settings.
+#
+# RULESETS. settings.yml's `org_rulesets:` are written once, to the
+# organisation, targeting every repository (`~ALL`), so neither file ever
+# names a repository. A ruleset marked `retire_repo_rulesets` replaces the
+# repository rulesets of the same name that were put on each repository by
+# hand; those are deleted, but only after the org ruleset has been read back
+# active and matching, and only where the repository itself shows it. A
+# ruleset that requires a workflow is written only once that workflow file
+# exists and its repository shares workflows with the org, because a
+# required workflow that can't run blocks every merge it covers.
 #
 # IT ALSO NEEDS contents: read, and forgetting that cost this job every
 # scheduled run it ever had. See the per-job permissions block below.
@@ -119,7 +132,283 @@ jobs:
             exit 1
           fi
 
+          # --- organisation rulesets: setup -------------------------------
+          RULESETS=$(yq -o=json '.org_rulesets // {}' "${POLICY}")
+
+          # A malformed entry stops the run before anything is written. A
+          # ruleset with no targets, or an enforcement GitHub would reject,
+          # must not be half-applied.
+          bad=$(echo "${RULESETS}" | jq -r 'to_entries[]
+            | select((.value.enforcement | IN("active", "disabled") | not)
+                or ((.value.repositories // []) | length) == 0
+                or ((.value.branches // []) | length) == 0)
+            | .key')
+          if [ -n "${bad}" ]; then
+            echo "::error::org_rulesets entries need enforcement (active|disabled), repositories and branches: ${bad//$'\n'/, }"
+            exit 1
+          fi
+
+          # App slugs in the policy (bypass apps, and the app pinned to each
+          # required check) become numeric IDs here, once, rather than being
+          # copied into settings.yml as magic numbers. A slug that does not
+          # resolve stops the run: a check pinned to the wrong app blocks
+          # every merge, and a bypass for the wrong app is a hole.
+          slugs=$(echo "${RULESETS}" | jq -r \
+            '[.[] | (.bypass_apps // [])[], ((.required_checks.checks // [])[] | .app // "github-actions")] | unique | .[]')
+          APP_IDS='{}'
+          for slug in ${slugs}; do
+            id=$(gh api "apps/${slug}" --jq .id) || { echo "::error::cannot resolve GitHub App '${slug}'"; exit 1; }
+            APP_IDS=$(echo "${APP_IDS}" | jq --arg s "${slug}" --argjson i "${id}" '. + {($s): $i}')
+          done
+
+          # Repositories named by required_workflows become numeric IDs the
+          # same way, and for the same reason: a workflow rule pointing at the
+          # wrong repository would block every merge in the org.
+          wf_repos=$(echo "${RULESETS}" | jq -r '[.[] | (.required_workflows // [])[] | .repository] | unique | .[]')
+          REPO_IDS='{}'
+          declare -A repo_private=()
+          for name in ${wf_repos}; do
+            meta=$(gh api "repos/${ORG}/${name}" --jq '{id, private}') \
+              || { echo "::error::cannot resolve repository '${ORG}/${name}' named in required_workflows"; exit 1; }
+            REPO_IDS=$(echo "${REPO_IDS}" | jq --arg n "${name}" --argjson i "$(echo "${meta}" | jq .id)" '. + {($n): $i}')
+            repo_private[${name}]=$(echo "${meta}" | jq -r .private)
+          done
+          echo "org rulesets: $(echo "${RULESETS}" | jq -r 'keys | join(", ")') | apps: $(echo "${APP_IDS}" | jq -c .) | workflow repos: $(echo "${REPO_IDS}" | jq -c .)"
+          echo
+
+          # One ruleset from the policy, in the shape the organisation
+          # rulesets API takes. `exclude` is always empty: an exclusion added
+          # by hand is a gate switched off, so it is drift to repair.
+          build_ruleset() {
+            jq -n --arg name "$1" --argjson p "$2" --argjson apps "${APP_IDS}" --argjson repos "${REPO_IDS}" '
+              [ ($p.required_checks.checks // [])[]
+                | {context, integration_id: $apps[.app // "github-actions"]} ] as $checks
+              | {
+                  name: $name,
+                  target: "branch",
+                  enforcement: $p.enforcement,
+                  conditions: {
+                    repository_name: {include: $p.repositories, exclude: []},
+                    ref_name: {include: $p.branches, exclude: []}
+                  },
+                  bypass_actors: [ ($p.bypass_apps // [])[]
+                    | {actor_id: $apps[.], actor_type: "Integration", bypass_mode: "pull_request"} ],
+                  rules: (
+                      (if $p.pull_request then [{type: "pull_request", parameters: $p.pull_request}] else [] end)
+                    + (if ($checks | length) > 0 then [{type: "required_status_checks", parameters: {
+                          strict_required_status_checks_policy: ($p.required_checks.strict // false),
+                          required_status_checks: $checks}}] else [] end)
+                    + (if $p.block_force_push then [{type: "non_fast_forward"}] else [] end)
+                    + (if $p.block_deletion then [{type: "deletion"}] else [] end)
+                    + (if (($p.required_workflows // []) | length) > 0 then [{type: "workflows", parameters: {
+                          do_not_enforce_on_create: true,
+                          workflows: [ $p.required_workflows[]
+                            | {path, repository_id: $repos[.repository], ref} ]}}] else [] end))
+                }'
+          }
+
+          # Does the ruleset GitHub holds ($2) enforce everything the policy
+          # asks for ($1)? GitHub adds defaults of its own to what it returns,
+          # so this compares only the fields the policy sets, rather than whole
+          # objects, which would never match. Conditions are compared in full,
+          # including `exclude` and any extra condition (a repository property
+          # filter, say) that would narrow which repositories are covered.
+          ruleset_matches() {
+            jq -n --argjson want "$1" --argjson have "$2" '
+              def checks: map({context, integration_id}) | sort_by(.context, .integration_id);
+              def actors: map({actor_id, actor_type, bypass_mode}) | sort_by(.actor_id);
+              def workflows: map({path, repository_id, ref}) | sort_by(.repository_id, .path);
+              def rule_ok($rules):
+                . as $w
+                | ($rules | map(select(.type == $w.type)) | first) as $h
+                | $h != null
+                  and (($w.parameters // {}) | to_entries | all(
+                        .key as $k | .value as $v | ($h.parameters // {})[$k] as $hv
+                        | if $k == "required_status_checks" then ($v | checks) == (($hv // []) | checks)
+                          elif $k == "workflows" then ($v | workflows) == (($hv // []) | workflows)
+                          elif ($v | type) == "array" then ($v | sort) == (($hv // []) | sort)
+                          else $v == $hv end));
+              def cond_ok($c):
+                (($want.conditions[$c].include // []) | sort) == (($have.conditions[$c].include // []) | sort)
+                and (($want.conditions[$c].exclude // []) | sort) == (($have.conditions[$c].exclude // []) | sort);
+              $want.enforcement == $have.enforcement
+              and $want.target == $have.target
+              and ($want.conditions | keys) == (($have.conditions // {}) | with_entries(select(.value != null)) | keys)
+              and ($want.conditions | keys | all(cond_ok(.)))
+              and ($want.bypass_actors | actors) == (($have.bypass_actors // []) | actors)
+              and ($want.rules | map(.type) | sort) == (($have.rules // []) | map(.type) | sort)
+              and ($want.rules | all(rule_ok($have.rules // [])))'
+          }
+
+          # Why GitHub refused an organisation-level call, from gh's error
+          # output. Prints PLAN-BLOCKED, NEEDS-ORG-ADMIN, or nothing for a
+          # refusal that is a real failure.
+          org_refusal() {
+            if grep -q "Upgrade to GitHub" <<< "$1"; then
+              echo PLAN-BLOCKED
+            elif grep -qE "HTTP 40[34]" <<< "$1"; then
+              echo NEEDS-ORG-ADMIN
+            fi
+          }
+
           total=0; changed=0; failed=0; blocked=0
+          org_drift=0; needs_org_admin=0
+          # ruleset name -> "1" once read back from GitHub active and matching.
+          # Only these may retire their repository-level copies.
+          declare -A verified=()
+          declare -A org_status=()
+
+          # An organisation-level call ($2: list, read, create, update) for
+          # ruleset $1 was refused, with gh output $3. Every org call goes
+          # through here, so no refusal can stop the run before the
+          # repositories are reconciled. The plan and a token without the org
+          # permission are reported, not failed; anything else is a failure.
+          org_refused() {
+            local why
+            why=$(org_refusal "$3")
+            if [ -z "${why}" ]; then
+              why=FAILED
+              failed=$((failed + 1))
+              echo "::warning::could not $2 org ruleset $1: $3"
+            else
+              blocked=$((blocked + 1))
+              if [ "${why}" = NEEDS-ORG-ADMIN ]; then needs_org_admin=1; fi
+            fi
+            org_status[$1]="${why}"
+            echo "blocked   org ruleset $1: $2(${why})"
+          }
+
+          # A required workflow that can't run blocks every merge it covers. So
+          # an active ruleset that requires one is written only when each
+          # workflow file exists at its ref, and its repository, if private,
+          # shares its workflows with the rest of the org. Prints the first
+          # problem found, or nothing.
+          workflow_unreachable() {
+            local name path ref access err
+            while IFS=$'\t' read -r name path ref; do
+              [ -n "${name}" ] || continue
+              if ! err=$(gh api "repos/${ORG}/${name}/contents/${path}?ref=${ref}" --silent 2>&1); then
+                if grep -q "HTTP 404" <<< "${err}"; then
+                  echo "${name}/${path} is not found at ${ref}"
+                else
+                  echo "could not check ${name}/${path} at ${ref}: ${err}"
+                fi
+                return 0
+              fi
+              if [ "${repo_private[${name}]}" = true ]; then
+                access=$(gh api "repos/${ORG}/${name}/actions/permissions/access" --jq .access_level 2>/dev/null) || access=unreadable
+                case "${access}" in
+                  organization|enterprise) ;;
+                  *)
+                    echo "${name} does not let the org's repositories use its workflows (Settings > Actions > General > Access: ${access})"
+                    return 0
+                    ;;
+                esac
+              fi
+            done < <(echo "$1" | jq -r '(.required_workflows // [])[] | [.repository, .path, .ref] | @tsv')
+          }
+
+          # --- organisation rulesets ----------------------------------------
+          # Created if missing, updated if it differs from the policy, then read
+          # back, because a 2xx is not evidence.
+          echo "--- organisation rulesets"
+          if ! org_list=$(gh api "orgs/${ORG}/rulesets?per_page=100" 2>&1); then
+            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
+              org_refused "${rs}" list "${org_list}"
+            done
+          else
+            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
+              pol=$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')
+              want=$(build_ruleset "${rs}" "${pol}")
+              if [ "$(echo "${pol}" | jq -r .enforcement)" = active ]; then
+                problem=$(workflow_unreachable "${pol}")
+                if [ -n "${problem}" ]; then
+                  org_status[${rs}]="UNREACHABLE"
+                  failed=$((failed + 1))
+                  echo "::warning title=WORKFLOW-UNREACHABLE::org ruleset ${rs} left as it is: ${problem}. Requiring a workflow that cannot run would block every merge it covers."
+                  echo "blocked   org ruleset ${rs}: UNREACHABLE"
+                  continue
+                fi
+              fi
+              rs_id=$(echo "${org_list}" | jq -r --arg n "${rs}" '[.[] | select(.name == $n)][0].id // empty')
+
+              if [ -n "${rs_id}" ]; then
+                if ! have=$(gh api "orgs/${ORG}/rulesets/${rs_id}" 2>&1); then
+                  org_refused "${rs}" read "${have}"
+                  continue
+                fi
+                if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
+                  org_status[${rs}]="ok"
+                  echo "ok        org ruleset ${rs} ($(echo "${want}" | jq -r .enforcement))"
+                  if [ "$(echo "${want}" | jq -r .enforcement)" = active ]; then verified[${rs}]=1; fi
+                  continue
+                fi
+                verb=PUT; path="orgs/${ORG}/rulesets/${rs_id}"; action=update
+              else
+                verb=POST; path="orgs/${ORG}/rulesets"; action=create
+              fi
+              org_drift=$((org_drift + 1))
+
+              if [ "${DRY_RUN}" = "true" ]; then
+                org_status[${rs}]="would ${action}"
+                echo "drift     org ruleset ${rs}: ${action}"
+                continue
+              fi
+
+              if ! out=$(echo "${want}" | gh api -X "${verb}" "${path}" --input - 2>&1); then
+                org_refused "${rs}" "${action}" "${out}"
+                continue
+              fi
+              # READ BACK what GitHub now holds, and check it enforces what
+              # was asked. A read-back that fails is not verification.
+              rs_id=$(echo "${out}" | jq -r '.id')
+              if ! have=$(gh api "orgs/${ORG}/rulesets/${rs_id}" 2>&1); then
+                org_refused "${rs}" "read back after ${action}" "${have}"
+                continue
+              fi
+              if [ "$(ruleset_matches "${want}" "${have}")" = "true" ]; then
+                org_status[${rs}]="${action}d"
+                echo "drift     org ruleset ${rs}: ${action}"
+                echo "  applied   org ruleset ${rs}"
+                if [ "$(echo "${want}" | jq -r .enforcement)" = active ]; then verified[${rs}]=1; fi
+              else
+                org_status[${rs}]="NOT-APPLIED"
+                echo "::warning::org ruleset ${rs} was accepted but does not match the policy"
+                failed=$((failed + 1))
+              fi
+            done
+          fi
+          # GitHub runs a PRIVATE required workflow only on private
+          # repositories. A public repository here would wait on a workflow
+          # that never runs, so say so, by name.
+          if echo "${RULESETS}" | jq -e '[.[] | select(.enforcement == "active") | (.required_workflows // [])[] | .repository] | length > 0' >/dev/null; then
+            for name in ${wf_repos}; do
+              [ "${repo_private[${name}]}" = true ] || continue
+              public=$(gh api --paginate "orgs/${ORG}/repos?type=public&per_page=100" \
+                --jq '.[] | select(.archived == false) | .full_name' 2>/dev/null | grep . | paste -sd ' ' -) || public=""
+              if [ -n "${public}" ]; then
+                echo "::warning title=PUBLIC-REPOS::${name} is private, so its required workflows cannot run on these public repositories, and their pull requests will wait for them: ${public}. Make ${name} public, or those repositories private."
+              fi
+              break
+            done
+          fi
+
+          if [ "${needs_org_admin}" = 1 ]; then
+            echo "::warning title=NEEDS-ORG-ADMIN::ORG_ADMIN_TOKEN cannot manage organisation rulesets. Grant it the organisation permission \"Administration: read and write\", or create them once by hand (Settings > Rules > Rulesets) to match settings.yml. Repository settings are still reconciled."
+          fi
+
+          # Repository rulesets to retire: only those whose org ruleset asked
+          # for it AND was verified above. Anything else stays where it is.
+          RETIRE=""
+          for rs in $(echo "${RULESETS}" | jq -r 'to_entries[] | select(.value.retire_repo_rulesets == true) | .key'); do
+            if [ -n "${verified[${rs}]:-}" ]; then
+              RETIRE="${RETIRE} ${rs}"
+            else
+              echo "info      repository rulesets named ${rs} are kept: the org ruleset is not verified active on this run"
+            fi
+          done
+          echo
+          echo "--- repositories"
 
           # $1 verb, $2 path, $3 label. Warns rather than stopping: one repo
           # refusing a write must not hide the other nineteen.
@@ -197,16 +486,58 @@ jobs:
               --jq '.security_and_analysis.secret_scanning.status // "unavailable"' 2>/dev/null || echo unavailable)
             [ "${ss}" = "enabled" ] || note="${note} secretscanning:${ss}"
 
+            # --- legacy repository rulesets -------------------------------
+            # Deleted only by exact name, only when the org ruleset of that
+            # name was verified above, and only when this repository itself
+            # lists that org ruleset as applying to it. A repository ruleset
+            # with any other name is never touched.
+            for rs in ${RETIRE}; do
+              if ! list=$(gh api "repos/${repo}/rulesets?includes_parents=true&per_page=100" 2>&1); then
+                # A plan that refuses rulesets cannot hold a copy to retire.
+                grep -q "Upgrade to GitHub" <<< "${list}" && continue
+                echo "::warning::could not list rulesets on ${repo}: ${list}"
+                failed=$((failed + 1))
+                continue
+              fi
+              legacy=$(echo "${list}" | jq -r --arg n "${rs}" \
+                '[.[] | select(.name == $n and .source_type == "Repository") | .id] | map(tostring) | join(" ")')
+              [ -n "${legacy}" ] || continue
+              if [ "$(echo "${list}" | jq --arg n "${rs}" 'any(.[]; .name == $n and .source_type == "Organization")')" != "true" ]; then
+                echo "info      ${repo}: repository ruleset ${rs} kept: the org ruleset is not listed as applying here"
+                continue
+              fi
+              note="${note} legacy-ruleset:${rs}:retire"
+              if [ "${DRY_RUN}" = "true" ]; then
+                continue
+              fi
+              for id in ${legacy}; do
+                if ! gh api -X DELETE "repos/${repo}/rulesets/${id}" --silent 2>/dev/null; then
+                  echo "::warning::could not delete repository ruleset ${rs} (${id}) on ${repo}"
+                  failed=$((failed + 1))
+                fi
+              done
+              # READ BACK: the copy must actually be gone.
+              left=$(gh api "repos/${repo}/rulesets?includes_parents=false&per_page=100" 2>/dev/null \
+                | jq --arg n "${rs}" '[.[] | select(.name == $n and .source_type == "Repository")] | length') || left=unknown
+              if [ "${left}" = "0" ]; then
+                echo "  applied   retired repository ruleset ${rs}"
+              else
+                note="${note}(NOT-APPLIED)"
+                echo "::warning::repository ruleset ${rs} on ${repo} is still present after delete"
+                failed=$((failed + 1))
+              fi
+            done
+
             if [ -z "${note}" ]; then
               echo "ok        ${repo}"
             else
               changed=$((changed + 1))
-              echo "drift     ${repo}: ${note}"
+              echo "drift     ${repo}: ${note# }"
             fi
           done <<< "${repos}"
 
           echo
-          echo "${total} repositories, ${changed} drifted, ${failed} could not be written, ${blocked} had keys the plan refuses"
+          echo "${total} repositories, ${changed} drifted, ${org_drift} org rulesets drifted, ${failed} could not be written, ${blocked} refused by plan or token"
           {
             echo "### Repository policy reconcile"
             echo
@@ -216,15 +547,22 @@ jobs:
             echo "- repositories: ${total}"
             echo "- drifted: ${changed}"
             echo "- failed to write: ${failed}"
-            echo "- keys silently refused by GitHub: ${blocked}"
+            echo "- refused by the plan or the token: ${blocked}"
+            echo
+            echo "| Org ruleset | State |"
+            echo "|---|---|"
+            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
+              echo "| \`${rs}\` | ${org_status[${rs}]:-unknown} |"
+            done
             echo
             echo "Policy source: \`settings.yml\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
           # A run that could not write what it found is not a success. A key
-          # the PLAN forbids is different: no token can change it, and failing
-          # nightly over it would make this permanently red, which is how a
-          # check stops being read. Reported loudly, not fatal.
+          # the PLAN forbids, or an org ruleset the token may not manage, is
+          # different: no run of this job can change it, and failing nightly
+          # over it would make this permanently red, which is how a check
+          # stops being read. Reported loudly, not fatal.
           if [ "${failed}" -gt 0 ] && [ "${DRY_RUN}" != "true" ]; then
             exit 1
           fi

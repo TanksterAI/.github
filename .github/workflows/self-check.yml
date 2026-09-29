@@ -92,3 +92,48 @@ jobs:
           # up to the next literal `"`, which an escaped `\"` isn't.
           done < <(grep -hoE 'github>[A-Za-z0-9._/-]+(:[A-Za-z0-9_-]+)?' ./*.json | sort -u)
           exit $fail
+
+  # The reconciler and the org-wide auto-merge workflow change every
+  # repository at once, so their shell is tested here, against a mock `gh`,
+  # before it can merge. The tests extract the real `run:` blocks with yq.
+  tests:
+    name: Scenario tests
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tools
+        run: |
+          set -euo pipefail
+          # yq ships on ubuntu-latest and in the fallback runner's image.
+          for t in yq jq python3; do command -v "$t" >/dev/null || { echo "::error::$t not found on runner"; exit 1; }; done
+          yq --version
+
+      - name: repo-settings-reconcile
+        run: bash tests/reconcile/test.sh .
+
+      - name: org-auto-merge
+        run: bash tests/org-auto-merge/test.sh .
+
+  # The one check the org-wide `ci-gate` ruleset requires. It passes only when every
+  # CI job listed in `needs` succeeded or was deliberately skipped, so the org rule
+  # never needs to know this repo's job names. Add new CI jobs to `needs`.
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs: [actionlint, presets, tests]
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: All required CI jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' >/dev/null \
+            || { echo "::error::A required CI job failed or was cancelled:"; echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'; exit 1; }

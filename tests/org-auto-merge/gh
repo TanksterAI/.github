@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Mock gh for org-auto-merge.yml. Behaviour from env:
+#   RULES_JSON (or RULES_FAIL=1), ARMED=true|false, MERGE_FAIL=1
+echo "$*" >> "${CALLS}"
+case "$1 $2" in
+  "api repos/"*)
+    [ -n "${RULES_FAIL:-}" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    echo "${RULES_JSON}" ;;
+  "pr view") echo "${ARMED:-false}" ;;
+  "pr merge")
+    if [[ " $* " == *" --auto "* ]]; then
+      if [ -n "${MERGE_FAIL:-}" ]; then echo "GraphQL: Auto merge is not allowed for this repository" >&2; exit 1; fi
+    fi ;;
+esac
+exit 0
