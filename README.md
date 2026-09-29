@@ -56,7 +56,7 @@ needs to be insulated from that.
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
 | `claude-review.yml` | any | Claude posts inline line-level PR review comments -- **retired 30 Aug 2026**, no active callers; CodeRabbit Pro is now the org's sole PR reviewer (see "The agent pipeline" below). Kept in the repo, unused, in case that changes |
 | `claude-address-feedback.yml` | any | Claude reads unresolved review threads (CodeRabbit + its own), fixes, resolves, pushes |
-| `org-auto-merge.yml` | any | **Not called by anyone.** The `auto-merge` org ruleset requires it, so GitHub runs it on every PR in every repository. Turns on auto-merge only where the base branch requires an approval and CI; never blocks, never merges itself |
+| `org-auto-merge.yml` | any | **Not called by anyone.** The `auto-merge` org ruleset requires it, so GitHub runs it on every PR in every repository. Turns on auto-merge only where the base branch requires an approval and CI; never merges itself, and its own decisions never block a PR (a failed run does) |
 | `auto-merge-gate.yml` | any | The per-repo predecessor of `org-auto-merge.yml`: callers can drop it once the `auto-merge` org ruleset is live |
 
 Every job sets `timeout-minutes` and a least-privilege `permissions` block.
@@ -126,8 +126,11 @@ opened to merged with no human review, by default, org-wide:
    a fork, or carries `needs-human-review`). No repository calls it: the
    `auto-merge` org ruleset requires it, so GitHub runs it everywhere, in
    repositories that don't exist yet too. It arms only where the base
-   branch's rules require an approval and a CI check besides CodeRabbit's,
-   and it always passes, so it can never be the reason a PR is stuck.
+   branch's rules require an approval and a CI check besides CodeRabbit's.
+   Its script exits 0 on every path it handles (armed, not armed, disarmed,
+   GitHub refusing), so its own decisions never block a PR. The run itself
+   can still fail, and then it blocks the merge like any failed required
+   check: see "A failed `arm` run blocks the merge" below.
 4. **The review gate** is what actually lets GitHub complete the merge.
    Neither workflow above ever calls merge itself. The gate is the
    `review-gate` **organisation ruleset** declared under `org_rulesets:` in
@@ -333,10 +336,16 @@ Stated plainly, so nobody relies on more than is there:
   `MERGE_APP_PRIVATE_KEY` for a GitHub App with Contents and Pull requests
   (read and write), and `org-auto-merge.yml` arms with that App instead, so
   release and deploy workflows fire after an auto-merge.
+- **A failed `arm` run blocks the merge.** `auto-merge / arm` is a required
+  workflow, so if the run itself fails (the runner named by `CI_RUNNER` is
+  unavailable, the 5-minute timeout is hit, or Actions has an outage) the PR
+  can't merge, by hand or automatically, until it passes. Re-run the `arm`
+  job from the PR's Checks tab, or push a commit.
 - **Personal accounts have no account-wide rulesets.** Repositories under a
-  personal account aren't covered by any of this. The plan there is to apply
-  the same ruleset body to each repository, still with no per-repository
-  data; that is a separate follow-up, not part of this reconciler.
+  personal account aren't covered by any of this. rishitank/.github handles
+  its own account separately: its reconciler writes the same ruleset body to
+  each public repository, and a scheduled sweep arms auto-merge, still with
+  no per-repository data.
 
 ## Security tooling, and what is deliberately absent
 
