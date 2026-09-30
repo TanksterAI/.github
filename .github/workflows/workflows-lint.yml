@@ -13,7 +13,7 @@
 # job ignores the organisation's CI_RUNNER variable, so it stops running when
 # the included Actions minutes run out while everything else moves to the
 # fallback runner. A job that really must stay on a GitHub-hosted runner says
-# so with a `# hosted-only` comment on its runs-on line.
+# so with a `# hosted-only` comment on its runs-on line (or on the label).
 name: workflows-lint
 
 on:
@@ -59,6 +59,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      # Reads each job's runs-on as YAML (yq keeps line numbers and comments),
+      # so block lists and larger-runner maps are caught and text in run:
+      # scripts is not. Both GitHub-hosted runners and the fallback image
+      # have yq v4 and jq.
       - name: Runners follow CI_RUNNER
         if: inputs.runner-policy != 'off'
         run: |
@@ -67,14 +71,32 @@ jobs:
             error|warning) ;;
             *) echo "::error title=runner-policy::must be error, warning or off, not '${POLICY}'"; exit 1 ;;
           esac
+          if ! yq --version 2>/dev/null | grep -q 'version v4'; then
+            echo "::error title=runner-policy::needs yq v4 (mikefarah) on the runner"; exit 1
+          fi
+          # shellcheck disable=SC2016 # yq and jq programs, not shell
+          query='.jobs // {} | .[] | select(has("runs-on")) | {"job": key,
+            "note": ((.["runs-on"] | key | line_comment) + " " + (.["runs-on"] | line_comment)),
+            "labels": [.["runs-on"] | .. | select(tag == "!!str") | {"v": ., "l": line, "c": line_comment}]}'
+          # shellcheck disable=SC2016
+          filter='select(.note | test("hosted-only") | not)
+            | select([.labels[].v] | index("self-hosted") | not)
+            | .job as $job | .labels[]
+            | select((.v | test("^ubuntu-")) and (.c | test("hosted-only") | not))
+            | "\(.l)\t\($job)\t\(.v)"'
           found=0
-          while IFS= read -r hit; do
-            file=${hit%%:*}; rest=${hit#*:}; line=${rest%%:*}
-            echo "::${POLICY} file=${file},line=${line},title=Hard-coded runner::This job always runs on a GitHub-hosted runner, so it stops when the included Actions minutes run out. Use the CI_RUNNER variable, as in ci/fallback-runner/README.md in TanksterAI/tankster-infra, or add '# hosted-only' to the line if it must stay hosted."
-            found=$((found + 1))
-          done < <(grep -rnE --include='*.yml' --include='*.yaml' \
-                     "^[[:space:]]*runs-on:[[:space:]]*\[?[[:space:]]*['\"]?ubuntu-" \
-                     .github/workflows 2>/dev/null | grep -v 'hosted-only')
+          shopt -s nullglob
+          for file in .github/workflows/*.yml .github/workflows/*.yaml; do
+            if ! jobs=$(yq -o=json -I0 "${query}" "${file}"); then
+              echo "::warning file=${file},title=Unparsed workflow::yq could not read this file; actionlint reports why."
+              continue
+            fi
+            while IFS=$'\t' read -r line job label; do
+              [ -n "${line}" ] || continue
+              echo "::${POLICY} file=${file},line=${line},title=Hard-coded runner::Job '${job}' always runs on the GitHub-hosted '${label}', so it stops when the included Actions minutes run out. Use the CI_RUNNER variable (see ci/fallback-runner/README.md in TanksterAI/tankster-infra), or add a '# hosted-only' comment to its runs-on line if it must stay hosted."
+              found=$((found + 1))
+            done < <(printf '%s\n' "${jobs}" | jq -r "${filter}")
+          done
           echo "${found} hard-coded runner(s)"
           if [ "${found}" -gt 0 ] && [ "${POLICY}" = "error" ]; then
             exit 1
