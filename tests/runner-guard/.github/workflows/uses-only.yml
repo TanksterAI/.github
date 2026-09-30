@@ -1,0 +1,7 @@
+# Only reusable-workflow calls, so no job has a runs-on of its own.
+on: push
+jobs:
+  ci:
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
+  security:
+    uses: TanksterAI/.github/.github/workflows/security.yml@v1
