@@ -8,6 +8,12 @@
 # Cheap and worth running on every repo that has workflows: it catches YAML
 # errors, bad `uses:` refs, undefined contexts and shellcheck issues in `run:`
 # blocks before they cost a red build.
+#
+# It also stops jobs from hard-coding a GitHub-hosted Ubuntu runner. Such a
+# job ignores the organisation's CI_RUNNER variable, so it stops running when
+# the included Actions minutes run out while everything else moves to the
+# fallback runner. A job that really must stay on a GitHub-hosted runner says
+# so with a `# hosted-only` comment on its runs-on line (or on the label).
 name: workflows-lint
 
 on:
@@ -32,6 +38,13 @@ on:
       timeout-minutes:
         type: number
         default: 10
+      runner-policy:
+        description: >-
+          What to do about a job-level runs-on that hard-codes a
+          GitHub-hosted Ubuntu runner instead of following CI_RUNNER:
+          error, warning or off.
+        type: string
+        default: error
 
 permissions:
   contents: read
@@ -45,6 +58,56 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
+
+      # Reads each job's runs-on as YAML (yq keeps line numbers and comments),
+      # so block lists and the labels of a group/labels map are caught, while
+      # group names and text in run: scripts are not. Both GitHub-hosted
+      # runners and the fallback image have yq v4 and jq.
+      - name: Runners follow CI_RUNNER
+        if: inputs.runner-policy != 'off'
+        run: |
+          set -uo pipefail
+          case "${POLICY}" in
+            error|warning) ;;
+            *) echo "::error title=runner-policy::must be error, warning or off, not '${POLICY}'"; exit 1 ;;
+          esac
+          if ! yq --version 2>/dev/null | grep -q 'version v4'; then
+            echo "::error title=runner-policy::needs yq v4 (mikefarah) on the runner"; exit 1
+          fi
+          # shellcheck disable=SC2016 # yq and jq programs, not shell
+          query='.jobs // {} | .[] | select(has("runs-on")) | {"job": key,
+            "note": ((.["runs-on"] | key | line_comment) + " " + (.["runs-on"] | line_comment)),
+            "labels": [(.["runs-on"] | ((select(tag == "!!map") | .labels), select(tag != "!!map")))
+              | .. | select(tag == "!!str") | {"v": ., "l": line, "c": line_comment}]}'
+          # shellcheck disable=SC2016
+          filter='select(.note | test("hosted-only") | not)
+            | select([.labels[].v] | index("self-hosted") | not)
+            | .job as $job | .labels[]
+            | select((.v | test("^ubuntu-")) and (.c | test("hosted-only") | not))
+            | "\(.l)\t\($job)\t\(.v)"'
+          found=0
+          shopt -s nullglob
+          for file in .github/workflows/*.yml .github/workflows/*.yaml; do
+            if ! jobs=$(yq -o=json -I0 "${query}" "${file}"); then
+              echo "::warning file=${file},title=Unparsed workflow::yq could not read this file; actionlint reports why."
+              continue
+            fi
+            if ! hits=$(printf '%s\n' "${jobs}" | jq -r "${filter}"); then
+              echo "::error file=${file},title=runner-policy::could not check this file's runs-on values"
+              exit 1
+            fi
+            while IFS=$'\t' read -r line job label; do
+              [ -n "${line}" ] || continue
+              echo "::${POLICY} file=${file},line=${line},title=Hard-coded runner::Job '${job}' always runs on the GitHub-hosted '${label}', so it stops when the included Actions minutes run out. Use the CI_RUNNER variable (see ci/fallback-runner/README.md in TanksterAI/tankster-infra), or add a '# hosted-only' comment to its runs-on line if it must stay hosted."
+              found=$((found + 1))
+            done <<< "${hits}"
+          done
+          echo "${found} hard-coded runner(s)"
+          if [ "${found}" -gt 0 ] && [ "${POLICY}" = "error" ]; then
+            exit 1
+          fi
+        env:
+          POLICY: ${{ inputs.runner-policy }}
 
       - name: Resolve latest actionlint
         id: resolve
