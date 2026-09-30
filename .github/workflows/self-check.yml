@@ -92,3 +92,43 @@ jobs:
           # up to the next literal `"`, which an escaped `\"` isn't.
           done < <(grep -hoE 'github>[A-Za-z0-9._/-]+(:[A-Za-z0-9_-]+)?' ./*.json | sort -u)
           exit $fail
+
+  # Runs the runner guard's own script, taken straight from
+  # workflows-lint.yml, over tests/runner-guard on a real runner. It must
+  # report exactly the lines marked expect-flag, with the right line numbers,
+  # and the error policy must fail on them.
+  runner-guard:
+    name: Runner guard fixtures
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Run the guard over its fixtures
+        working-directory: tests/runner-guard
+        run: |
+          set -euo pipefail
+          guard="${RUNNER_TEMP}/guard.sh"
+          yq '.jobs.actionlint.steps[] | select(.name == "Runners follow CI_RUNNER") | .run' \
+            ../../.github/workflows/workflows-lint.yml > "${guard}"
+          test -s "${guard}"
+          POLICY=warning bash "${guard}" > "${RUNNER_TEMP}/out.txt"
+          # Shown defused, so the fixtures' findings do not annotate this PR.
+          sed 's/^::/: :/' "${RUNNER_TEMP}/out.txt"
+          grep -oE 'file=[^,]+,line=[0-9]+' "${RUNNER_TEMP}/out.txt" \
+            | sed -E 's/^file=([^,]+),line=/\1:/' | sort > "${RUNNER_TEMP}/got"
+          grep -rnE '#[[:space:]]*expect-flag[[:space:]]*$' .github/workflows \
+            | cut -d: -f1,2 | sort > "${RUNNER_TEMP}/want"
+          diff -u "${RUNNER_TEMP}/want" "${RUNNER_TEMP}/got"
+          if POLICY=error bash "${guard}" > /dev/null; then
+            echo "::error::runner-policy error did not fail on hard-coded runners"
+            exit 1
+          fi
+          echo "ok  $(wc -l < "${RUNNER_TEMP}/want") expected findings, no others"
+
+  # The whole reusable workflow, as consumers get it, over this repository.
+  workflows-lint:
+    name: workflows-lint
+    uses: ./.github/workflows/workflows-lint.yml

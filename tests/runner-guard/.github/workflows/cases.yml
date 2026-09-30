@@ -1,0 +1,36 @@
+# Runner guard fixtures. Lines marked expect-flag must be reported; no others.
+on: push
+jobs:
+  scalar:
+    runs-on: ubuntu-latest  # expect-flag
+  quoted:
+    runs-on: "ubuntu-24.04"  # expect-flag
+  flow-list:
+    runs-on: [ubuntu-latest]  # expect-flag
+  block-list:
+    runs-on:
+      - ubuntu-22.04  # expect-flag
+  group-map:
+    runs-on:
+      group: self-hosted
+      labels: ubuntu-latest  # expect-flag
+  follows-ci-runner:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: |
+          echo "runs-on: ubuntu-latest"
+  exempt-on-value:
+    runs-on: ubuntu-latest  # hosted-only: production deploy
+  exempt-on-key:
+    runs-on:  # hosted-only: needs a GitHub-hosted image
+      - ubuntu-latest
+  self-hosted:
+    runs-on: [self-hosted, ubuntu-latest]
+  group-name-only:
+    runs-on:
+      group: ubuntu-build
+      labels: [linux]
+  windows:
+    runs-on: windows-latest
+  reusable:
+    uses: ./.github/workflows/other.yml

@@ -1,0 +1,12 @@
+# A reusable workflow whose runner is an input: nothing to flag.
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        default: ubuntu-latest
+jobs:
+  build:
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: echo ok

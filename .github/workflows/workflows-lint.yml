@@ -62,7 +62,8 @@ jobs:
       # Reads each job's runs-on as YAML (yq keeps line numbers and comments),
       # so block lists and the labels of a group/labels map are caught, while
       # group names and text in run: scripts are not. Both GitHub-hosted
-      # runners and the fallback image have yq v4 and jq.
+      # runners and the fallback image have yq v4 and jq. self-check.yml runs
+      # this exact script over tests/runner-guard on every change.
       - name: Runners follow CI_RUNNER
         if: inputs.runner-policy != 'off'
         run: |
@@ -71,7 +72,7 @@ jobs:
             error|warning) ;;
             *) echo "::error title=runner-policy::must be error, warning or off, not '${POLICY}'"; exit 1 ;;
           esac
-          if ! yq --version 2>/dev/null | grep -q 'version v4'; then
+          if ! yq --header-preprocess=false -n '1' >/dev/null 2>&1; then
             echo "::error title=runner-policy::needs yq v4 (mikefarah) on the runner"; exit 1
           fi
           # shellcheck disable=SC2016 # yq and jq programs, not shell
@@ -79,16 +80,22 @@ jobs:
             "note": ((.["runs-on"] | key | line_comment) + " " + (.["runs-on"] | line_comment)),
             "labels": [(.["runs-on"] | ((select(tag == "!!map") | .labels), select(tag != "!!map")))
               | .. | select(tag == "!!str") | {"v": ., "l": line, "c": line_comment}]}'
+          # yq yields a bare {"labels": []} for a file with no runs-on job,
+          # and null for an absent comment, so the filter tolerates both.
           # shellcheck disable=SC2016
-          filter='select(.note | test("hosted-only") | not)
-            | select([.labels[].v] | index("self-hosted") | not)
-            | .job as $job | .labels[]
-            | select((.v | test("^ubuntu-")) and (.c | test("hosted-only") | not))
+          filter='select(.job != null)
+            | select((.note // "") | test("hosted-only") | not)
+            | select([.labels[]?.v] | index("self-hosted") | not)
+            | .job as $job | .labels[]?
+            | select((.v | type) == "string" and (.v | test("^ubuntu-"))
+                     and ((.c // "") | test("hosted-only") | not))
             | "\(.l)\t\($job)\t\(.v)"'
           found=0
           shopt -s nullglob
           for file in .github/workflows/*.yml .github/workflows/*.yaml; do
-            if ! jobs=$(yq -o=json -I0 "${query}" "${file}"); then
+            # Without --header-preprocess=false, yq drops a file's leading
+            # comments before parsing and every line number comes out short.
+            if ! jobs=$(yq --header-preprocess=false -o=json -I0 "${query}" "${file}"); then
               echo "::warning file=${file},title=Unparsed workflow::yq could not read this file; actionlint reports why."
               continue
             fi
