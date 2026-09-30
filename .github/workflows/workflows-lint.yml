@@ -60,9 +60,9 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       # Reads each job's runs-on as YAML (yq keeps line numbers and comments),
-      # so block lists and larger-runner maps are caught and text in run:
-      # scripts is not. Both GitHub-hosted runners and the fallback image
-      # have yq v4 and jq.
+      # so block lists and the labels of a group/labels map are caught, while
+      # group names and text in run: scripts are not. Both GitHub-hosted
+      # runners and the fallback image have yq v4 and jq.
       - name: Runners follow CI_RUNNER
         if: inputs.runner-policy != 'off'
         run: |
@@ -77,7 +77,8 @@ jobs:
           # shellcheck disable=SC2016 # yq and jq programs, not shell
           query='.jobs // {} | .[] | select(has("runs-on")) | {"job": key,
             "note": ((.["runs-on"] | key | line_comment) + " " + (.["runs-on"] | line_comment)),
-            "labels": [.["runs-on"] | .. | select(tag == "!!str") | {"v": ., "l": line, "c": line_comment}]}'
+            "labels": [(.["runs-on"] | ((select(tag == "!!map") | .labels), select(tag != "!!map")))
+              | .. | select(tag == "!!str") | {"v": ., "l": line, "c": line_comment}]}'
           # shellcheck disable=SC2016
           filter='select(.note | test("hosted-only") | not)
             | select([.labels[].v] | index("self-hosted") | not)
@@ -91,11 +92,15 @@ jobs:
               echo "::warning file=${file},title=Unparsed workflow::yq could not read this file; actionlint reports why."
               continue
             fi
+            if ! hits=$(printf '%s\n' "${jobs}" | jq -r "${filter}"); then
+              echo "::error file=${file},title=runner-policy::could not check this file's runs-on values"
+              exit 1
+            fi
             while IFS=$'\t' read -r line job label; do
               [ -n "${line}" ] || continue
               echo "::${POLICY} file=${file},line=${line},title=Hard-coded runner::Job '${job}' always runs on the GitHub-hosted '${label}', so it stops when the included Actions minutes run out. Use the CI_RUNNER variable (see ci/fallback-runner/README.md in TanksterAI/tankster-infra), or add a '# hosted-only' comment to its runs-on line if it must stay hosted."
               found=$((found + 1))
-            done < <(printf '%s\n' "${jobs}" | jq -r "${filter}")
+            done <<< "${hits}"
           done
           echo "${found} hard-coded runner(s)"
           if [ "${found}" -gt 0 ] && [ "${POLICY}" = "error" ]; then
