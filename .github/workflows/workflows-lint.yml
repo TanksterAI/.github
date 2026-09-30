@@ -8,6 +8,12 @@
 # Cheap and worth running on every repo that has workflows: it catches YAML
 # errors, bad `uses:` refs, undefined contexts and shellcheck issues in `run:`
 # blocks before they cost a red build.
+#
+# It also stops jobs from hard-coding a GitHub-hosted Ubuntu runner. Such a
+# job ignores the organisation's CI_RUNNER variable, so it stops running when
+# the included Actions minutes run out while everything else moves to the
+# fallback runner. A job that really must stay on a GitHub-hosted runner says
+# so with a `# hosted-only` comment on its runs-on line.
 name: workflows-lint
 
 on:
@@ -32,6 +38,13 @@ on:
       timeout-minutes:
         type: number
         default: 10
+      runner-policy:
+        description: >-
+          What to do about a job-level runs-on that hard-codes a
+          GitHub-hosted Ubuntu runner instead of following CI_RUNNER:
+          error, warning or off.
+        type: string
+        default: error
 
 permissions:
   contents: read
@@ -45,6 +58,29 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - name: Runners follow CI_RUNNER
+        if: inputs.runner-policy != 'off'
+        run: |
+          set -uo pipefail
+          case "${POLICY}" in
+            error|warning) ;;
+            *) echo "::error title=runner-policy::must be error, warning or off, not '${POLICY}'"; exit 1 ;;
+          esac
+          found=0
+          while IFS= read -r hit; do
+            file=${hit%%:*}; rest=${hit#*:}; line=${rest%%:*}
+            echo "::${POLICY} file=${file},line=${line},title=Hard-coded runner::This job always runs on a GitHub-hosted runner, so it stops when the included Actions minutes run out. Use the CI_RUNNER variable, as in ci/fallback-runner/README.md in TanksterAI/tankster-infra, or add '# hosted-only' to the line if it must stay hosted."
+            found=$((found + 1))
+          done < <(grep -rnE --include='*.yml' --include='*.yaml' \
+                     "^[[:space:]]*runs-on:[[:space:]]*\[?[[:space:]]*['\"]?ubuntu-" \
+                     .github/workflows 2>/dev/null | grep -v 'hosted-only')
+          echo "${found} hard-coded runner(s)"
+          if [ "${found}" -gt 0 ] && [ "${POLICY}" = "error" ]; then
+            exit 1
+          fi
+        env:
+          POLICY: ${{ inputs.runner-policy }}
 
       - name: Resolve latest actionlint
         id: resolve
