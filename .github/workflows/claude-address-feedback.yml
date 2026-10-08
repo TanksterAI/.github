@@ -56,15 +56,46 @@ permissions:
   contents: read
 
 jobs:
+  # No Anthropic credential means claude-code-action fails on its first step
+  # and the caller shows a red run for something nobody asked it to do. Check
+  # first and skip cleanly instead. The secrets are tested for presence only,
+  # through env, and never printed.
+  credentials:
+    name: Check Anthropic credential
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    permissions: {}
+    timeout-minutes: 2
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - name: Check for an Anthropic credential
+        id: check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude-code-oauth-token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${ANTHROPIC_API_KEY}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "available=false" >> "${GITHUB_OUTPUT}"
+          msg="Address feedback is skipped because no Anthropic credential is configured. Set the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN organisation secret to enable it."
+          echo "::notice title=Claude skipped::${msg}"
+          echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
+
   address:
     name: Address feedback
+    needs: credentials
     if: >-
+      needs.credentials.outputs.available == 'true' && (
       (github.event_name == 'pull_request_review' &&
        github.event.review.state != 'approved' &&
        contains(fromJSON('["coderabbitai[bot]","claude[bot]"]'), github.event.review.user.login)) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
        contains(fromJSON('["coderabbitai[bot]","claude[bot]"]'), github.event.comment.user.login))
+      )
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
