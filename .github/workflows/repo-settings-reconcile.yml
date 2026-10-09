@@ -31,6 +31,12 @@
 # a separate job with its own switch, because a deleted branch is not undone
 # by rerunning anything: schedule and push apply only while settings.yml says
 # true, and a hand-run follows the `prune` input, which defaults to dry-run.
+#
+# THIRD JOB, `rulesets`: rulesets.review_gate in settings.yml. Each repository
+# carries its own review-gate ruleset, so the policy lives here rather than in
+# forty settings pages. Only the required-approvals number is managed; every
+# other rule is read and written back unchanged, and every write is read back.
+# Logic and tests: scripts/reconcile-rulesets.sh, test/reconcile-rulesets/.
 name: repo-settings-reconcile
 
 on:
@@ -63,6 +69,15 @@ on:
         description: >-
           Merged-branch prune. dry-run reports what would be deleted; apply
           deletes it, whatever settings.yml says.
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+      rulesets:
+        description: >-
+          review-gate ruleset reconcile. dry-run reports; apply writes
+          rulesets.review_gate from settings.yml.
         type: choice
         options:
           - dry-run
@@ -314,3 +329,58 @@ jobs:
           path: ${{ runner.temp }}/branch-prune-report.json
           if-no-files-found: warn
           retention-days: 30
+
+  # Separate job, not a step in `reconcile`: a merge-setting write failing on
+  # one repository must not hide the ruleset report, and the reverse.
+  rulesets:
+    name: Reconcile review-gate rulesets
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    # Checkout of this private repository only; every API call uses
+    # ORG_ADMIN_TOKEN (Administration: write), never GITHUB_TOKEN.
+    permissions:
+      contents: read
+    concurrency:
+      group: rulesets-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide mode
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.rulesets }}
+        run: |
+          set -euo pipefail
+          # Schedule and push apply: editing settings.yml IS the decision, the
+          # same rule as the reconcile job. A hand-run follows its input,
+          # which defaults to dry-run.
+          if [ "${EVENT}" = "workflow_dispatch" ]; then
+            case "${REQUESTED}" in
+              apply) mode=apply ;;
+              dry-run|"") mode=dry-run ;;
+              *) echo "::error::rulesets must be dry-run or apply, not '${REQUESTED}'"; exit 1 ;;
+            esac
+          else
+            mode=apply
+          fi
+          echo "mode: ${mode}"
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+
+      - name: Reconcile rulesets
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::ORG_ADMIN_TOKEN is not set. The default GITHUB_TOKEN cannot"
+            echo "::error::read or write rulesets on other repositories."
+            exit 1
+          fi
+          command -v yq >/dev/null || { echo "::error::yq not found on runner"; exit 1; }
+          bash scripts/reconcile-rulesets.sh --org "${ORG}" --mode "${MODE}" --policy settings.yml

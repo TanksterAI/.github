@@ -11,7 +11,9 @@ check() { if eval "$2"; then echo "ok   - $1"; pass=$((pass+1)); else echo "FAIL
 
 setup() {
   FAKE_DIR=$(mktemp -d); export FAKE_DIR
-  bin=$(mktemp -d); cp "$here/fake-gh" "$bin/gh"; export PATH="$bin:$PATH"
+  # chmod: git stores fake-gh as 100644, and PATH lookup skips a file that is
+  # not executable, which would send these tests to the real gh.
+  bin=$(mktemp -d); cp "$here/fake-gh" "$bin/gh"; chmod +x "$bin/gh"; export PATH="$bin:$PATH"
   cat > "$FAKE_DIR/repos.json" <<'J'
 [{"full_name":"acme/one","archived":false},{"full_name":"acme/two","archived":false},
  {"full_name":"acme/three","archived":false},{"full_name":"acme/free","archived":false},
