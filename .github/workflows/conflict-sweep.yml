@@ -21,6 +21,10 @@
 # derivable from an event, with no polling and no drift. The caller triggers
 # on `push`, this runs seconds later.
 #
+# Only same-repository PRs are swept. A fork's head is untrusted code, and
+# the resolve job reads it with a write token and git/gh tools; it could not
+# push a resolution back to a fork anyway.
+#
 # NOT HANDLED HERE, deliberately: a PR that is merely `behind` its base with
 # no conflicts. The obvious fix -- calling the update-branch API with
 # GITHUB_TOKEN -- pushes a commit that GitHub will not run workflows on, so
@@ -70,8 +74,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # No Anthropic credential means claude-code-action fails on its first step
+  # and the caller shows a red run for something nobody asked it to do. Check
+  # first and skip cleanly instead -- detect included, since its only purpose
+  # is to feed resolve. The secrets are tested for presence only, through
+  # env, and never printed.
+  credentials:
+    name: Check Anthropic credential
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    permissions: {}
+    timeout-minutes: 2
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - name: Check for an Anthropic credential
+        id: check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude-code-oauth-token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${ANTHROPIC_API_KEY}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "available=false" >> "${GITHUB_OUTPUT}"
+          msg="Conflict sweep is skipped because no Anthropic credential is configured. Set the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN organisation secret to enable it."
+          echo "::notice title=Claude skipped::${msg}"
+          echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
+
   detect:
     name: Find newly conflicted PRs
+    needs: credentials
+    if: needs.credentials.outputs.available == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -87,17 +122,20 @@ jobs:
           REPO: ${{ github.repository }}
           BASE: ${{ inputs.base-branch }}
           INCLUDE_DRAFTS: ${{ inputs.include-drafts }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          filter='.[] | select(.state == "OPEN")'
+          # Same-repository heads only: fork code must never reach an agent
+          # that holds a write token.
+          filter='.[] | select(.state == "OPEN") | select(.isCrossRepository == false)'
           if [ "${INCLUDE_DRAFTS}" != "true" ]; then
             filter="${filter} | select(.isDraft == false)"
           fi
 
           candidates=$(gh pr list --repo "${REPO}" --base "${BASE}" \
             --state open --limit 100 \
-            --json number,isDraft,state --jq "${filter} | .number")
+            --json number,isDraft,state,isCrossRepository --jq "${filter} | .number")
 
           if [ -z "${candidates}" ]; then
             echo "No open PRs targeting ${BASE}."
@@ -153,10 +191,28 @@ jobs:
             echo "\`${json}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+          # resolve cannot run on push (see the note on that job), so say
+          # plainly which PRs need a person.
+          if [ "${EVENT}" = "push" ]; then
+            echo "::warning title=Conflicted PRs::${json} now conflict with ${BASE}. They need the base merged in by hand: claude-code-action does not run on push events."
+          fi
+
+  # KNOWN LIMITATIONS, so this job is skipped on push:
+  # - anthropics/claude-code-action rejects `push` events ("Unsupported event
+  #   type: push"; it supports issues, issue_comment, pull_request(_target),
+  #   pull_request_review(_comment), workflow_dispatch, repository_dispatch,
+  #   schedule and workflow_run). The caller triggers on push, so running it
+  #   there would only turn every push to main red. detect still lists the
+  #   conflicted PRs and warns about them.
+  # - The action also declines to merge or rebase, even with the git tools
+  #   allowed, so the "merge the base in" prompt below cannot do its job from
+  #   any event. Making conflict resolution work needs a different design
+  #   (for example a workflow step that merges, with Claude resolving only
+  #   the conflicted files); until then this job stays dormant.
   resolve:
     name: "Resolve #${{ matrix.pr }}"
-    needs: detect
-    if: needs.detect.outputs.conflicted != '[]'
+    needs: [credentials, detect]
+    if: github.event_name != 'push' && needs.credentials.outputs.available == 'true' && (needs.detect.outputs.conflicted != '[]')
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
@@ -173,11 +229,11 @@ jobs:
       id-token: write
       actions: read
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b # v1.0.247
         with:
           anthropic_api_key: ${{ secrets.anthropic-api-key }}
           claude_code_oauth_token: ${{ secrets.claude-code-oauth-token }}
