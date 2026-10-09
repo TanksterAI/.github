@@ -72,12 +72,12 @@ jobs:
       FLOWS_FILE: ${{ inputs.working-directory }}/.github/runtime-gate-flows.json
       BRANCH: ${{ inputs.branch }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download the report
         id: report
         continue-on-error: true
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.artifact }}
           path: ${{ runner.temp }}/rg-report
@@ -106,7 +106,7 @@ jobs:
       - name: Merge into the flows file
         id: merge
         if: steps.collect.outputs.files != ''
-        uses: TanksterAI/.github/.github/actions/runtime-gate@1d8e8ba66ede50587745827b5400cdfd25722590
+        uses: TanksterAI/.github/.github/actions/runtime-gate@7e22b13255bfa7fadfdec580fc41a359985b0b61
         with:
           mode: merge-flows
           flows-new: ${{ steps.collect.outputs.files }}
