@@ -425,11 +425,25 @@ jobs:
           docker run -d --name rg-postgres -p 5432:5432 \
             -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=app \
             "postgres:${PG_VERSION}"
+          # Probe over TCP, not the Unix socket. The image's entrypoint runs
+          # initdb behind a temporary server that listens on the socket only
+          # (listen_addresses=''), then stops it and starts the real server. A
+          # socket probe can pass against the temporary server and the next
+          # one land in the restart gap ("/var/run/postgresql:5432 - no
+          # response"); only the real server answers on TCP.
+          ready=false
           for _ in $(seq 1 60); do
-            if docker exec rg-postgres pg_isready -U postgres -d app >/dev/null 2>&1; then break; fi
+            if docker exec rg-postgres pg_isready -h 127.0.0.1 -p 5432 -U postgres -d app >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
             sleep 1
           done
-          docker exec rg-postgres pg_isready -U postgres -d app
+          if [ "${ready}" != true ]; then
+            docker logs --tail 40 rg-postgres 2>&1 || true
+            echo "::error title=Postgres did not start::postgres:${PG_VERSION} did not accept TCP connections on 127.0.0.1:5432 within 60 s."
+            exit 1
+          fi
           url="postgres://postgres:postgres@127.0.0.1:5432/app"
           grep -q '^DATABASE_URL=' "${RUNNER_TEMP}/rg.env" || {
             echo "DATABASE_URL=${url}" >> "$GITHUB_ENV"
