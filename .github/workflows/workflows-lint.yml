@@ -14,6 +14,11 @@
 # the included Actions minutes run out while everything else moves to the
 # fallback runner. A job that really must stay on a GitHub-hosted runner says
 # so with a `# hosted-only` comment on its runs-on line (or on the label).
+#
+# Nothing here pushes, so checkout does not keep the token, and the actions
+# are pinned to commit SHAs. The actionlint binary matches the runner's OS
+# (Linux or macOS) and architecture (x64 or arm64), and the cache key
+# includes both.
 name: workflows-lint
 
 on:
@@ -57,7 +62,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Reads each job's runs-on as YAML (yq keeps line numbers and comments),
       # so block lists and the labels of a group/labels map are caught, while
@@ -139,17 +146,27 @@ jobs:
 
       - name: Cache actionlint
         id: cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.cache/actionlint
-          key: ${{ runner.os }}-actionlint-${{ steps.resolve.outputs.version }}
+          key: ${{ runner.os }}-${{ runner.arch }}-actionlint-${{ steps.resolve.outputs.version }}
 
       - name: Install actionlint
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          case "${RUNNER_OS}" in
+            Linux) os=linux ;;
+            macOS) os=darwin ;;
+            *) echo "::error title=actionlint::no .tar.gz release for runner OS '${RUNNER_OS}'"; exit 1 ;;
+          esac
+          case "${RUNNER_ARCH}" in
+            X64) arch=amd64 ;;
+            ARM64) arch=arm64 ;;
+            *) echo "::error title=actionlint::no release for runner architecture '${RUNNER_ARCH}'"; exit 1 ;;
+          esac
           mkdir -p "${GITHUB_WORKSPACE}/.cache/actionlint"
-          url="https://github.com/rhysd/actionlint/releases/download/${TAG}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/${TAG}/actionlint_${VERSION}_${os}_${arch}.tar.gz"
           curl -fsSL --retry 3 "$url" -o /tmp/actionlint.tar.gz
           tar -xzf /tmp/actionlint.tar.gz -C "${GITHUB_WORKSPACE}/.cache/actionlint" actionlint
           chmod +x "${GITHUB_WORKSPACE}/.cache/actionlint/actionlint"

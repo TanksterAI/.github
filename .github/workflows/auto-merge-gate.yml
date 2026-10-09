@@ -1,8 +1,8 @@
 # Reusable auto-merge gate.
 #
-# Turns auto-merge on for every PR the moment it's opened, unless it carries
-# the opt-out label -- and turns it back off if that label is added later,
-# or on again if the label is removed.
+# Turns auto-merge on for every PR into the default branch the moment it's
+# opened, unless it carries the opt-out label -- and turns it back off if
+# that label is added later, or on again if the label is removed.
 #
 # The actual merge timing is entirely governed by the TanksterAI org ruleset
 # (required status checks + require all conversations resolved), not by
@@ -34,7 +34,12 @@ permissions:
 jobs:
   gate:
     name: Set auto-merge
-    if: github.event.pull_request.draft == false
+    # Only PRs into the default branch: that is the branch the org ruleset
+    # protects. A PR into any other branch may have no required checks or
+    # review, and turning auto-merge on there would merge it at once.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
@@ -50,8 +55,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${HAS_LABEL}" = "true" ]; then
-            echo "Opt-out label present; disabling auto-merge (if it was on)."
-            gh pr merge "${PR}" --disable-auto || true
+            # A failed opt-out must fail the job, or the label would look like
+            # it worked while auto-merge stays on. Only call --disable-auto
+            # when auto-merge is actually on, so "already off" is not an error.
+            enabled=$(gh pr view "${PR}" --json autoMergeRequest --jq '.autoMergeRequest != null')
+            if [ "${enabled}" = "true" ]; then
+              echo "Opt-out label present; disabling auto-merge."
+              gh pr merge "${PR}" --disable-auto
+            else
+              echo "Opt-out label present; auto-merge is already off."
+            fi
           else
             echo "No opt-out label; enabling auto-merge (--${MERGE_METHOD})."
             gh pr merge "${PR}" --auto "--${MERGE_METHOD}"
