@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Minimal fake of `gh api` for reconcile-rulesets.sh tests. State in $FAKE_DIR.
+set -euo pipefail
+[ "$1" = api ] || { echo "unsupported" >&2; exit 2; }
+shift
+method=GET; input=""; jqf=""; path=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --paginate|--silent) shift ;;
+    -X) method="$2"; shift 2 ;;
+    --input) input="$2"; shift 2 ;;
+    --jq) jqf="$2"; shift 2 ;;
+    *) path="$1"; shift ;;
+  esac
+done
+p="${path%%\?*}"
+case "${method} ${p}" in
+  "GET orgs/acme/repos") out=$(cat "$FAKE_DIR/repos.json") ;;
+  "GET repos/acme/"*/rulesets)
+    r=$(echo "$p" | cut -d/ -f3)
+    [ -f "$FAKE_DIR/$r.forbidden" ] && { echo "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)" >&2; exit 1; }
+    [ -f "$FAKE_DIR/$r.err" ] && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+    out=$(cat "$FAKE_DIR/$r.list.json" 2>/dev/null || echo '[]') ;;
+  "GET repos/acme/"*/rulesets/*) r=$(echo "$p" | cut -d/ -f3); out=$(cat "$FAKE_DIR/$r.rs.json") ;;
+  "PUT repos/acme/"*/rulesets/*)
+    r=$(echo "$p" | cut -d/ -f3)
+    echo "$r" >> "$FAKE_DIR/puts.log"
+    cp "$input" "$FAKE_DIR/$r.lastbody.json"
+    [ -f "$FAKE_DIR/$r.ignorewrite" ] && exit 0
+    jq -s '.[0] * .[1]' "$FAKE_DIR/$r.rs.json" "$input" > "$FAKE_DIR/$r.tmp" && mv "$FAKE_DIR/$r.tmp" "$FAKE_DIR/$r.rs.json"
+    exit 0 ;;
+  *) echo "fake gh: no route for ${method} ${p}" >&2; exit 1 ;;
+esac
+if [ -n "$jqf" ]; then echo "$out" | jq -r "$jqf"; else echo "$out"; fi
