@@ -50,8 +50,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${HAS_LABEL}" = "true" ]; then
-            echo "Opt-out label present; disabling auto-merge (if it was on)."
-            gh pr merge "${PR}" --disable-auto || true
+            # A failed opt-out must fail the job, or the label would look like
+            # it worked while auto-merge stays on. Only call --disable-auto
+            # when auto-merge is actually on, so "already off" is not an error.
+            enabled=$(gh pr view "${PR}" --json autoMergeRequest --jq '.autoMergeRequest != null')
+            if [ "${enabled}" = "true" ]; then
+              echo "Opt-out label present; disabling auto-merge."
+              gh pr merge "${PR}" --disable-auto
+            else
+              echo "Opt-out label present; auto-merge is already off."
+            fi
           else
             echo "No opt-out label; enabling auto-merge (--${MERGE_METHOD})."
             gh pr merge "${PR}" --auto "--${MERGE_METHOD}"
