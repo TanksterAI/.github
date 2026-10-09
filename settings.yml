@@ -68,5 +68,19 @@ maintenance:
   # Off by default. Turn it on deliberately, and watch one dry run first.
   prune_merged_branches: false
 
+rulesets:
+  # Applied by the `rulesets` job in repo-settings-reconcile.yml to the
+  # repository-level ruleset of this name in every repository.
+  review_gate:
+    name: review-gate
+    # 0, decided by Rishi on 2026-10-09. This org has one human, and GitHub
+    # never lets the author approve their own pull request, so 1 could never
+    # be met and every merge needed a bypass -- and a bypass skips EVERY rule.
+    # With 0, the rules that actually gate a merge stay enforced: the
+    # CodeRabbit status check, every review thread resolved, squash only, no
+    # deletion and no force-push. Those are not managed here and are written
+    # back exactly as read.
+    required_approving_review_count: 0
+
 # Version updates are deliberately absent, and no dependabot.yml is shipped:
 # that would duplicate Renovate outright and put two changelogs on every bump.
