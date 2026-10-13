@@ -1,11 +1,26 @@
 # This repository's own CI. A broken workflow here breaks every consuming repo
 # at once, so it lints itself before anything can merge.
+#
+# Two jobs, pull requests only, since Oct 2026. It used to be four jobs on
+# every pull request and again on the push to main after the merge:
+#   - a standalone actionlint job, which the workflows-lint call below already
+#     runs (same tool, same files), so actionlint ran twice;
+#   - the push to main re-checked a tree the pull request had just checked
+#     (squash merges only, and the ruleset requires the branch be up to date);
+#   - presets and the runner-guard fixtures were separate VMs for a few
+#     seconds of work each, billed a whole minute apiece.
+# Only CodeRabbit is a required check here, so the path filter cannot leave a
+# docs-only pull request waiting on a check that never runs.
 name: self-check
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    paths:
+      - ".github/**"
+      - "*.json"
+      - "tests/**"
+      - "test/**"
+      - "scripts/**"
   workflow_dispatch:
 
 concurrency:
@@ -16,40 +31,8 @@ permissions:
   contents: read
 
 jobs:
-  actionlint:
-    name: actionlint
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install actionlint
-        run: |
-          set -euo pipefail
-          latest=$(
-            curl -fsSL --retry 2 \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              https://api.github.com/repos/rhysd/actionlint/releases/latest \
-              | grep -m1 -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9]+\.[0-9]+\.[0-9]+"' \
-              | sed -E 's/.*"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/'
-          ) || true
-          [ -n "${latest:-}" ] || latest="v1.7.7"
-          curl -fsSL --retry 3 \
-            "https://github.com/rhysd/actionlint/releases/download/${latest}/actionlint_${latest#v}_linux_amd64.tar.gz" \
-            -o /tmp/actionlint.tar.gz
-          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
-          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
-          actionlint -version
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Lint workflows
-        run: actionlint -color
-
   presets:
-    name: Renovate presets
+    name: Renovate presets and runner guard
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -93,20 +76,13 @@ jobs:
           done < <(grep -hoE 'github>[A-Za-z0-9._/-]+(:[A-Za-z0-9_-]+)?' ./*.json | sort -u)
           exit $fail
 
-  # Runs the runner guard's own script, taken straight from
-  # workflows-lint.yml, over tests/runner-guard on a real runner. It must
-  # report exactly the lines marked expect-flag, with the right line numbers,
-  # and the error policy must fail on them.
-  runner-guard:
-    name: Runner guard fixtures
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7.0.1
-
+      # Runs the runner guard's own script, taken straight from
+      # workflows-lint.yml, over tests/runner-guard. It must report exactly the
+      # lines marked expect-flag, with the right line numbers, and the error
+      # policy must fail on them.
       - name: Run the guard over its fixtures
+        # Reports even when a preset check above failed, as its own job did.
+        if: ${{ !cancelled() }}
         working-directory: tests/runner-guard
         run: |
           set -euo pipefail

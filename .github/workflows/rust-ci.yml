@@ -37,9 +37,18 @@ on:
         type: string
         default: --all-targets
       build-release:
-        description: Build with --release after tests pass.
+        description: >-
+          Build with --release after tests pass, on pushes and scheduled or
+          manual runs. Pull requests skip it unless release-on-pr is true: the
+          debug build already proved the code compiles and passes, and the
+          release build recompiles the whole crate graph (often the longest
+          step). A release-only break shows on the push to main.
         type: boolean
         default: true
+      release-on-pr:
+        description: Also build with --release on pull requests.
+        type: boolean
+        default: false
       forbid-panics:
         description: >-
           Fail if unwrap/expect/panic!/todo!/unimplemented! appear in .rs files
@@ -166,5 +175,5 @@ jobs:
           SCAN_PATH: ${{ inputs.forbid-panics-path }}
 
       - name: Build release
-        if: inputs.build-release
+        if: inputs.build-release && (github.event_name != 'pull_request' || inputs.release-on-pr)
         run: cargo build --release

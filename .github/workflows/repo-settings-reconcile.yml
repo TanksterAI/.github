@@ -48,17 +48,19 @@ on:
     paths:
       - settings.yml
   schedule:
-    # Still nightly, and still worth having. The two drift sources this file
+    # Weekly (Monday) since Oct 2026, and still worth having. The two drift sources this file
     # cannot see as events are a NEW repository appearing and someone editing
     # a setting in the UI. Both are organisation-level webhook events, and
     # GitHub Actions can only be triggered by events in its OWN repository --
     # so catching them needs an org webhook plus a receiver firing
     # repository_dispatch, not a trigger. Until that exists, the clock is the
-    # fallback.
+    # fallback. Nightly cost three VMs a night for drift that is rare (a new
+    # repository, a setting changed in the UI); run it by hand after either,
+    # or wait for Monday.
     #
     # Observed jitter on this cron has been up to six hours. Do not read
     # "0 4" as a promise, and do not bother staggering these by minutes.
-    - cron: "0 4 * * *"
+    - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
       dry-run:
@@ -254,7 +256,7 @@ jobs:
 
           # A run that could not write what it found is not a success. A key
           # the PLAN forbids is different: no token can change it, and failing
-          # nightly over it would make this permanently red, which is how a
+          # every run over it would make this permanently red, which is how a
           # check stops being read. Reported loudly, not fatal.
           if [ "${failed}" -gt 0 ] && [ "${DRY_RUN}" != "true" ]; then
             exit 1

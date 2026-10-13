@@ -2,7 +2,7 @@
 #
 # Applied to every non-archived repository by
 # .github/workflows/repo-settings-reconcile.yml -- on a push to this file,
-# nightly, and on demand.
+# weekly (Monday), and on demand.
 #
 # The shape here is deliberately the one github-community-projects/safe-settings
 # consumes. If this org ever outgrows sixty lines of bash, this file migrates
