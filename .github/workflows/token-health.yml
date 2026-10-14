@@ -24,8 +24,11 @@ name: token-health
 
 on:
   schedule:
-    # Early enough that a warning is read on the same working day.
-    - cron: "0 8 * * *"
+    # Weekly, Monday 08:00, early enough that a warning is read the same
+    # working day. It was daily until Oct 2026: thirty VMs a month for a
+    # check whose threshold is 14 days, so weekly still warns at least a
+    # week before the token expires.
+    - cron: "0 8 * * 1"
   workflow_dispatch:
 
 permissions: {}
@@ -112,7 +115,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
           if [ "${days}" -lt 0 ]; then
-            echo "::error::ORG_ADMIN_TOKEN EXPIRED ${days#-} days ago. The nightly"
+            echo "::error::ORG_ADMIN_TOKEN EXPIRED ${days#-} days ago. The weekly"
             echo "::error::reconciler has not been applying settings since then."
             exit 1
           fi
