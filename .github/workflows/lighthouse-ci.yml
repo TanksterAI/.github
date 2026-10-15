@@ -229,6 +229,39 @@ jobs:
           done
           echo "missing=true" >> "$GITHUB_OUTPUT"
 
+      # Chrome's shared libraries, installed here rather than by setup-chrome's
+      # install-dependencies. That option runs `sudo apt-get install` with an
+      # environment holding only DEBIAN_FRONTEND, so sudo can find apt-get
+      # only through a sudoers secure_path. The fallback runner's image writes
+      # /etc/sudoers as upstream actions/runner does, without one, and the
+      # install died with "sudo: apt-get: command not found" (tankster-ai-public
+      # job 116575355382). The list is every package providing a library the
+      # Chrome binary links against on Ubuntu 24.04, plus fonts-liberation,
+      # the fonts GitHub-hosted runners render with. Other systems fall back
+      # to setup-chrome's own install.
+      - name: Install Chrome's libraries
+        id: chrome-libs
+        if: steps.chrome.outputs.missing == 'true'
+        continue-on-error: ${{ !inputs.strict }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . /etc/os-release
+          major="${VERSION_ID:-0}"
+          major="${major%%.*}"
+          if [ "${ID:-}" != "ubuntu" ] || [ "${major}" -lt 24 ]; then
+            echo "Not Ubuntu 24.04 or later (${PRETTY_NAME:-unknown}); setup-chrome installs the libraries."
+            exit 0
+          fi
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            fonts-liberation libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
+            libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libexpat1 libgbm1 \
+            libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libudev1 libx11-6 \
+            libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 \
+            libxrandr2
+          echo "installed=true" >> "$GITHUB_OUTPUT"
+
       # Advisory unless strict, like the audit: a failed download must not
       # turn an advisory job red.
       - name: Install Chrome
@@ -237,7 +270,7 @@ jobs:
         continue-on-error: ${{ !inputs.strict }}
         uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
         with:
-          install-dependencies: true
+          install-dependencies: ${{ steps.chrome-libs.outputs.installed != 'true' }}
 
       - name: Lighthouse CI
         if: steps.config.outputs.found == 'true'
