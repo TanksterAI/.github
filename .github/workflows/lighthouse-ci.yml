@@ -208,12 +208,18 @@ jobs:
       # lhci drives an installed Chrome. GitHub-hosted runners have one; the
       # Cloud Build fallback runner's image deliberately does not (every
       # fallback job pulls that image, and Chrome was over a fifth of it), so
-      # install one only where none is found. The names are the ones
-      # chrome-launcher, which lhci uses, looks for.
+      # install one only where none is found. CHROME_PATH and the names are
+      # what chrome-launcher, which lhci uses, looks for.
       - name: Check for Chrome
         id: chrome
         if: steps.config.outputs.found == 'true'
         run: |
+          set -euo pipefail
+          if [ -n "${CHROME_PATH:-}" ] && [ -x "${CHROME_PATH}" ]; then
+            echo "Found CHROME_PATH=${CHROME_PATH}"
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           for b in google-chrome google-chrome-stable chromium chromium-browser; do
             if command -v "$b" >/dev/null 2>&1; then
               echo "Found $b"
@@ -238,8 +244,8 @@ jobs:
         id: lhci
         continue-on-error: ${{ !inputs.strict }}
         env:
-          # Empty when Chrome was already installed; lhci then finds it itself.
-          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          # Empty when Chrome was already there; lhci then finds it itself.
+          SETUP_CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
           SELF_HOSTED: ${{ runner.environment == 'self-hosted' }}
           LHCI_VERSION: ${{ inputs.lhci-version }}
         # On a self-hosted runner (the Cloud Build fallback), Chrome runs in a
@@ -252,6 +258,11 @@ jobs:
         # alone.
         run: |
           set -euo pipefail
+          # Exported only when set, so an empty value never masks a CHROME_PATH
+          # the runner already provides.
+          if [ -n "${SETUP_CHROME_PATH}" ]; then
+            export CHROME_PATH="${SETUP_CHROME_PATH}"
+          fi
           if [ "${SELF_HOSTED}" = "true" ]; then
             export LHCI_COLLECT__SETTINGS__CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage"
           fi
