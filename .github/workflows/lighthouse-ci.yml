@@ -205,11 +205,68 @@ jobs:
           # audited nothing — a silent no-op dressed up as a green check.
           exit 1
 
+      # lhci drives an installed Chrome. GitHub-hosted runners have one; the
+      # Cloud Build fallback runner's image deliberately does not (every
+      # fallback job pulls that image, and Chrome was over a fifth of it), so
+      # install one only where none is found. CHROME_PATH and the names are
+      # what chrome-launcher, which lhci uses, looks for.
+      - name: Check for Chrome
+        id: chrome
+        if: steps.config.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          if [ -n "${CHROME_PATH:-}" ] && [ -x "${CHROME_PATH}" ]; then
+            echo "Found CHROME_PATH=${CHROME_PATH}"
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for b in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "$b" >/dev/null 2>&1; then
+              echo "Found $b"
+              echo "missing=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "missing=true" >> "$GITHUB_OUTPUT"
+
+      # Advisory unless strict, like the audit: a failed download must not
+      # turn an advisory job red.
+      - name: Install Chrome
+        id: setup-chrome
+        if: steps.chrome.outputs.missing == 'true'
+        continue-on-error: ${{ !inputs.strict }}
+        uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
+        with:
+          install-dependencies: true
+
       - name: Lighthouse CI
         if: steps.config.outputs.found == 'true'
         id: lhci
         continue-on-error: ${{ !inputs.strict }}
-        run: npx --yes @lhci/cli@${{ inputs.lhci-version }} autorun
+        env:
+          # Empty when Chrome was already there; lhci then finds it itself.
+          SETUP_CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          SELF_HOSTED: ${{ runner.environment == 'self-hosted' }}
+          LHCI_VERSION: ${{ inputs.lhci-version }}
+        # On a self-hosted runner (the Cloud Build fallback), Chrome runs in a
+        # container that cannot create the user namespaces its sandbox needs:
+        # every run died with "No usable sandbox!" (tankster-ai-public job
+        # 116013940439). --no-sandbox is the usual fix for Chrome in a
+        # container, and --disable-dev-shm-usage avoids Docker's 64 MB
+        # /dev/shm. Set through LHCI's environment and only there, so it
+        # replaces a repo's own collect.settings.chromeFlags on those runners
+        # alone.
+        run: |
+          set -euo pipefail
+          # Exported only when set, so an empty value never masks a CHROME_PATH
+          # the runner already provides.
+          if [ -n "${SETUP_CHROME_PATH}" ]; then
+            export CHROME_PATH="${SETUP_CHROME_PATH}"
+          fi
+          if [ "${SELF_HOSTED}" = "true" ]; then
+            export LHCI_COLLECT__SETTINGS__CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage"
+          fi
+          npx --yes "@lhci/cli@${LHCI_VERSION}" autorun
 
       - name: Upload Lighthouse results
         if: always() && steps.config.outputs.found == 'true'
