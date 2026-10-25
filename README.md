@@ -244,7 +244,8 @@ Public repos can and should keep a CodeQL workflow of their own alongside this.
 }
 ```
 
-Presets: `default` (implied by `github>TanksterAI/.github`), `node`, `python`, `rust`.
+Presets: `default` (implied by `github>TanksterAI/.github`), `node`, `python`, `rust`,
+and the opt-in `tanksterai-ui` (see [below](#opt-in-the-tanksterai-ui-packages)).
 
 Updates come **once a month**, in a window on the 1st-3rd (London time), and
 normally as two pull requests per repository: `non-major (automerge)`
@@ -273,6 +274,53 @@ hand: Renovate will not touch it again.
 
 If this repository is private, the Renovate app must be installed on it as well
 as on the consuming repos, or preset resolution will fail.
+
+### Opt-in: the `@tanksterai` UI packages
+
+A product that uses the private UI packages `@tanksterai/tokens`,
+`@tanksterai/css` and `@tanksterai/react` (published to GitHub Packages) adds
+`tanksterai-ui` after its language preset:
+
+```json
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>TanksterAI/.github:node", "github>TanksterAI/.github:tanksterai-ui"]
+}
+```
+
+What `tanksterai-ui.json` does:
+
+- Maps the `@tanksterai` scope to `https://npm.pkg.github.com` (`npmrc`, with
+  `npmrcMerge` so the repository's own `.npmrc` settings are kept, plus
+  `registryUrls`) and signs in there with the Mend credential below.
+- Puts the three packages in one `tanksterai-ui` pull request, labelled
+  `tankster-ui`, that opens as soon as a release is published. It overrides the
+  monthly window and turns the release-age wait off (`minimumReleaseAge: null`,
+  with `minimumReleaseAgeBehaviour: "timestamp-optional"`). The estate-wide
+  `prConcurrentLimit` and `prHourlyLimit` still apply; `prPriority` puts this
+  pull request first in the queue.
+- Never automerges, even when the packages are devDependencies (which
+  `default.json` otherwise automerges). Majors open no pull request until they
+  are ticked on the Dependency Dashboard.
+- Disables `@tanksterai/design-tokens`, which `@tanksterai/tokens` replaced.
+  Renovate opens no pull requests for it. It cannot stop someone adding it
+  back to a `package.json`, and moving off it is a change made by hand.
+
+It is a separate preset, not part of `default` or `node`, because its host rule
+needs a credential. A repository that extends it while the credential is missing
+stops with a Renovate config error ("The following secrets name was not found
+in config: TANKSTERAI_PACKAGES_TOKEN"). Opting in keeps that to the
+repositories that asked for it.
+
+**The credential.** `TANKSTERAI_PACKAGES_TOKEN` is a Mend credential that the
+organisation owner adds at [developer.mend.io](https://developer.mend.io), in
+the organisation's settings under *Credentials*. Add it at organisation level,
+not repository level, so every opted-in repository inherits it. It is a GitHub
+personal access token (classic), from an account that can read the packages,
+with only the `read:packages` scope. It is not a GitHub Actions secret and never
+goes in a repository: the preset names it, as
+`{{ secrets.TANKSTERAI_PACKAGES_TOKEN }}`, and Mend fills it in at run time. If
+the token was given an expiry date, renew it in the same place before then.
 
 ## CI minute budget
 

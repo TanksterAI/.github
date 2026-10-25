@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Opt-in preset for products on the @tanksterai UI packages (@tanksterai/tokens, @tanksterai/css, @tanksterai/react), published to GitHub Packages. Add it after the language preset: \"extends\": [\"github>TanksterAI/.github:node\", \"github>TanksterAI/.github:tanksterai-ui\"]. Requires the TANKSTERAI_PACKAGES_TOKEN credential in the Mend developer portal: a repository that extends this preset without it stops with a Renovate config error. It is not part of default.json or node.json for exactly that reason.",
+  "npmrc": "@tanksterai:registry=https://npm.pkg.github.com/",
+  "npmrcMerge": true,
+  "hostRules": [
+    {
+      "description": "Read-only access to the org's GitHub Packages npm registry. The secret is a classic token with read:packages only, stored as an organisation credential at developer.mend.io and never in a repository.",
+      "matchHost": "npm.pkg.github.com",
+      "hostType": "npm",
+      "token": "{{ secrets.TANKSTERAI_PACKAGES_TOKEN }}"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Look the @tanksterai scope up on GitHub Packages, not npmjs.org. The npmrc line above already does this; stating it here as well keeps lookups right if a repository's own .npmrc, .yarnrc or pnpm-workspace.yaml maps the scope elsewhere.",
+      "matchDatasources": ["npm"],
+      "matchPackageNames": ["@tanksterai/**"],
+      "registryUrls": ["https://npm.pkg.github.com"]
+    },
+    {
+      "description": "The UI packages are ours and are released together, so they arrive together and at once: one 'tanksterai-ui' pull request, outside the monthly window, with no release-age wait. The release-age wait is off because a regression in our own package is ours to find, and timestamp-optional means a missing publish time is never a reason to hold one back. Always human-reviewed: automerge is set off explicitly because default.json automerges devDependencies, and these are often devDependencies.",
+      "matchPackageNames": ["@tanksterai/**"],
+      "groupName": "tanksterai-ui",
+      "groupSlug": "tanksterai-ui",
+      "schedule": ["at any time"],
+      "minimumReleaseAge": null,
+      "minimumReleaseAgeBehaviour": "timestamp-optional",
+      "automerge": false,
+      "addLabels": ["tankster-ui"],
+      "prPriority": 5
+    },
+    {
+      "description": "A major of the UI packages is a migration across the product. No pull request until it is ticked on the Dependency Dashboard.",
+      "matchPackageNames": ["@tanksterai/**"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
+    {
+      "description": "@tanksterai/design-tokens was replaced by @tanksterai/tokens. Renovate never updates it, so a repository still on it gets no pull requests for it and has to migrate to @tanksterai/tokens by hand. Renovate cannot stop someone adding it back to a package.json; this only keeps it out of update pull requests.",
+      "matchPackageNames": ["@tanksterai/design-tokens"],
+      "enabled": false
+    }
+  ]
+}
