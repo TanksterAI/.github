@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Opt-in preset for products on the @tanksterai UI packages (@tanksterai/tokens, @tanksterai/css, @tanksterai/react), published to GitHub Packages. Add it after the language preset: \"extends\": [\"github>TanksterAI/.github:node\", \"github>TanksterAI/.github:tanksterai-ui\"]. Requires the TANKSTERAI_PACKAGES_TOKEN credential in the Mend developer portal: a repository that extends this preset without it stops with a Renovate config error. It is not part of default.json or node.json for exactly that reason.",
+  "description": "Opt-in preset for products on the @tanksterai UI packages (@tanksterai/tokens, @tanksterai/css, @tanksterai/react), published to GitHub Packages. Add it after the language preset: \"extends\": [\"github>TanksterAI/.github:node\", \"github>TanksterAI/.github:tanksterai-ui\"]. The order matters: placed before the language preset, default.json's devDependency rule wins and automerges these packages. Requires the TANKSTERAI_PACKAGES_TOKEN credential in the Mend developer portal: a repository that extends this preset without it stops with a Renovate config error. It is not part of default.json or node.json for exactly that reason.",
   "npmrc": "@tanksterai:registry=https://npm.pkg.github.com/",
   "npmrcMerge": true,
   "hostRules": [
@@ -19,7 +19,7 @@
       "registryUrls": ["https://npm.pkg.github.com"]
     },
     {
-      "description": "The UI packages are ours and are released together, so they arrive together and at once: one 'tanksterai-ui' pull request, outside the monthly window, with no release-age wait. The release-age wait is off because a regression in our own package is ours to find, and timestamp-optional means a missing publish time is never a reason to hold one back. Always human-reviewed: automerge is set off explicitly because default.json automerges devDependencies, and these are often devDependencies.",
+      "description": "The UI packages are ours and are released together, so they arrive together, at the next Renovate run after a release: one 'tanksterai-ui' pull request, outside the monthly window, with no release-age wait. minimumReleaseAge null is what turns the wait off, because a regression in our own package is ours to find. minimumReleaseAgeBehaviour does nothing while minimumReleaseAge is null; it is only a guard, so that if an age is ever set here, a missing publish time cannot hold a release back. Always human-reviewed: automerge is set off explicitly because default.json automerges devDependencies, and these are often devDependencies.",
       "matchPackageNames": ["@tanksterai/**"],
       "groupName": "tanksterai-ui",
       "groupSlug": "tanksterai-ui",
