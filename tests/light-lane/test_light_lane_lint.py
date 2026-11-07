@@ -58,6 +58,9 @@ LIGHT_WORKFLOWS = {
     "rust-ci.yml": ["verify"],
     "workflows-lint.yml": ["actionlint"],
 }
+# Agentic sessions, off the lane unless a caller turns it on: a re-run after
+# the light runner's egress stop would repeat the session.
+LIGHT_OFF_BY_DEFAULT = {"claude-address-feedback.yml", "conflict-sweep.yml"}
 # These keep their runner expression: Docker (or, for lighthouse-ci, Chrome
 # and its system libraries, not yet tried on Cloud Run).
 NOT_LIGHT = ["lighthouse-ci.yml", "runtime-gate.yml", "security.yml", "claude-review.yml"]
@@ -141,13 +144,18 @@ class Summaries(lint.Resolver):
         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97": "node24",
         "actions/upload-artifact@v7.0.1": "node24",
         "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333": "node24",
-        "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": "node24",
+        "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": "node24",
+        "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": "node24",
         "pnpm/action-setup@v6.0.10": "node24",
         "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6": "node24",
         "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6": "node24",
     }
     COMPOSITE = {
         "TanksterAI/.github/.github/actions/runtime-gate@7e22b13255bfa7fadfdec580fc41a359985b0b61": [
+            "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+        ],
+        # #27 changed only the toolkit's scripts; its action.yml is the same.
+        "TanksterAI/.github/.github/actions/runtime-gate@087cbb6d99cfdbd2f0a78c47de08adeaea92dbb2": [
             "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
         ],
         "anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b": [
@@ -178,7 +186,7 @@ class Fixtures(unittest.TestCase):
 
     def test_pass_fixture_counts_its_light_jobs(self):
         light, _ = lint.check_file(os.path.join(FIXTURES, "pass.yml"), Recorded())
-        self.assertEqual(light, 5)
+        self.assertEqual(light, 6)
 
     def test_fail_fixture_reports_every_job_as_expected(self):
         path = os.path.join(FIXTURES, "fail.yml")
@@ -255,6 +263,16 @@ class DockerCommands(unittest.TestCase):
         "docker ps 2>/dev/null": "docker", "`docker ps`": "docker",
         'echo "$(docker version --format \'{{.Server.Version}}\')"': "docker",
         'echo "id: `docker ps -q`"': "docker",
+        # Heredocs: a body a shell reads is a script; after the body, and
+        # after a `<<` inside quotes, lines are commands again.
+        "bash <<'EOF'\ndocker ps\nEOF": "docker",
+        "cat <<EOF | sh\ndocker ps\nEOF": "docker",
+        "cat > a <<'EOF'\ntext\nEOF\ndocker ps": "docker",
+        "cat <<A <<B\na\nA\nb\nB\ndocker ps": "docker",
+        "cat <<-EOF\n\tdocker run\n\tEOF\ndocker ps": "docker",
+        "echo '<<EOF'\ndocker ps": "docker",
+        'echo "a <<EOF b"\ndocker ps': "docker",
+        "read -r x <<< word\ndocker ps": "docker",
     }
     WORDS = [
         "make docker-up", "bash scripts/up.sh", "npx testcontainers", "skopeo copy a b",
@@ -263,6 +281,10 @@ class DockerCommands(unittest.TestCase):
         "cat Dockerfile", "dockerd --version", "export DOCKER_HOST=x", "my-docker-thing run",
         "./scripts/docker_helper.sh", "command -v docker", "command -V docker", "which docker",
         "type docker", "hash docker", "if ! command -v docker >/dev/null; then exit 0; fi",
+        "cat > notes.md <<'EOF'\ndocker run is not used here\nEOF",
+        "cat <<-EOF\n\tkind create cluster\n\tEOF\necho ok",
+        'python3 - <<EOF\nimport shutil\ndocker = shutil.which("docker")\nEOF',
+        'cat <<"END"\ndocker ps\nEND',
     ]
 
     def test_commands(self):
@@ -279,7 +301,55 @@ class DockerCommands(unittest.TestCase):
 
     def test_the_lint_does_not_flag_its_own_source(self):
         with open(_extract_script(), encoding="utf-8") as handle:
-            self.assertEqual(lint.docker_commands(handle.read()), [])
+            source = handle.read()
+        self.assertEqual(lint.docker_commands(source), [])
+        # And it never could from where it runs: a python3 step is not
+        # shell, so even a line that starts with a tool name is not read.
+        job = {"runs-on": OWN, "steps": [{"shell": "python3 {0}", "run": source + "\ndocker = 1\n"}]}
+        self.assertEqual(lint.job_problems(job, Recorded()), [])
+
+
+class Shells(unittest.TestCase):
+    SCRIPT = 'docker = shutil.which("docker")\n'
+
+    def problems(self, step, job_defaults=None, workflow_defaults=None):
+        job = {"runs-on": OWN, "steps": [dict(step, run=self.SCRIPT)]}
+        if job_defaults:
+            job["defaults"] = {"run": {"shell": job_defaults}}
+        workflow = {"run": {"shell": workflow_defaults}} if workflow_defaults else None
+        return lint.job_problems(job, Recorded(), workflow)
+
+    def test_shell_steps_are_read(self):
+        for shell in [None, "bash", "sh", "bash -e {0}", "bash --noprofile --norc -eo pipefail {0}", "/bin/sh -e {0}"]:
+            step = {} if shell is None else {"shell": shell}
+            self.assertEqual(len(self.problems(step)), 1, shell)
+
+    def test_other_shells_are_not(self):
+        for shell in ["python", "python3 {0}", "pwsh", "powershell", "cmd", "node {0}", "perl {0}"]:
+            self.assertEqual(self.problems({"shell": shell}), [], shell)
+
+    def test_defaults_decide_when_the_step_does_not(self):
+        self.assertEqual(self.problems({}, job_defaults="python"), [])
+        self.assertEqual(self.problems({}, workflow_defaults="pwsh"), [])
+        self.assertEqual(len(self.problems({}, job_defaults="bash", workflow_defaults="pwsh")), 1)
+        self.assertEqual(len(self.problems({"shell": "bash"}, job_defaults="python")), 1)
+
+
+class LightInputType(unittest.TestCase):
+    def check(self, light_input):
+        inputs = "\n      light:\n        type: {}\n".format(light_input) if light_input else ""
+        path = _temp_yaml(
+            "on:\n  workflow_call:\n    inputs:\n      runs-on:\n        type: string\n" + inputs
+            + "jobs:\n  j:\n    runs-on: " + CONTRACT + "\n    steps:\n      - run: echo hi\n"
+        )
+        return [m for _, _, m in _problems(path, Recorded())]
+
+    def test_the_shared_form_needs_a_boolean_light_input(self):
+        self.assertEqual(self.check("boolean"), [])
+        for light_input in ["string", None]:
+            found = self.check(light_input)
+            self.assertEqual(len(found), 1, light_input)
+            self.assertIn("type boolean", found[0])
 
 
 class Labels(unittest.TestCase):
@@ -404,6 +474,16 @@ class HttpResolver(unittest.TestCase):
             self.assertEqual(len(resolver.warnings), 1, repo)
             self.assertIn(why, resolver.warnings[0])
             self.assertEqual(self.hits[repo], 3, repo)
+
+    def test_after_one_outage_the_rest_are_tried_once(self):
+        resolver = self.resolver()
+        self.hits["down"] = self.hits["busy"] = 0
+        self.assertEqual(lint.action_problems("o/down@v1", resolver), [])
+        self.assertEqual(lint.action_problems("o/busy@v1", resolver), [])
+        self.assertEqual((self.hits["down"], self.hits["busy"]), (3, 1))
+        self.assertEqual(len(resolver.warnings), 2)
+        # A definite answer still counts while degraded.
+        self.assertIn("not found", lint.action_problems("o/missing@v1", resolver)[0])
 
     def test_first_party_fallback_only_when_unreadable(self):
         self.assertEqual(lint.action_problems("actions/checkout@deadbeef", self.resolver()), [])
@@ -557,10 +637,34 @@ class ShippedWorkflows(unittest.TestCase):
             data = self.load(name)
             self.assertEqual(sorted(data["jobs"]), sorted(jobs), name)
             inputs = (data.get(True) or data.get("on"))["workflow_call"]["inputs"]
-            self.assertEqual(inputs["light"], {**inputs["light"], "type": "boolean", "default": True}, name)
+            default = name not in LIGHT_OFF_BY_DEFAULT
+            self.assertEqual(inputs["light"], {**inputs["light"], "type": "boolean", "default": default}, name)
+            self.assertIn("64 MiB", inputs["light"]["description"], name)
             self.assertEqual(inputs["runs-on"]["default"], "", name)
             for job in jobs:
                 self.assertEqual(data["jobs"][job]["runs-on"], CONTRACT, "{}: {}".format(name, job))
+
+    def test_light_runners_never_save_a_cache(self):
+        """Every cache save in a light job is switched off on the light runner
+        (runner name crj-...), so no light job uploads one."""
+        off = "!startsWith(runner.name, 'crj-')"
+        for name, jobs in LIGHT_WORKFLOWS.items():
+            data = self.load(name)
+            for job in jobs:
+                for step in data["jobs"][job].get("steps") or []:
+                    uses = str(step.get("uses", ""))
+                    with_ = step.get("with") or {}
+                    where = "{}: {}: {}".format(name, job, step.get("name") or uses)
+                    if uses.startswith("actions/cache@"):
+                        self.fail(where + ": actions/cache saves; use restore and a gated save")
+                    if uses.startswith("actions/cache/save@"):
+                        self.assertIn(off, step.get("if", ""), where)
+                    if uses.startswith("Swatinem/rust-cache@"):
+                        self.assertIn(off, str(with_.get("save-if", "")), where)
+                    if uses.startswith("actions/setup-node@"):
+                        self.assertIn(off, str(with_.get("package-manager-cache", "")), where)
+                        if "cache" in with_:
+                            self.assertIn(off, str(with_["cache"]), where)
 
     def test_light_jobs_pass_the_lint(self):
         for name in LIGHT_WORKFLOWS:

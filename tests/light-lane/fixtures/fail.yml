@@ -84,6 +84,20 @@ jobs:
     steps:
       - run: echo hi
 
+  uppercase-label: # expect: must be exactly
+    runs-on: Tankster-Light
+    steps:
+      - run: echo hi
+
+  shared-form-without-a-boolean-light-input: # expect: needs a `light` input of type boolean
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
   services: # expect: has services
     runs-on: *light
     services:
@@ -136,6 +150,32 @@ jobs:
       - run: |
           eval docker ps
           nice -n 5 docker ps
+
+  heredoc-read-by-bash: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: |
+          bash <<'EOF'
+          docker ps
+          EOF
+
+  docker-after-a-heredoc: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: |
+          cat > notes.md <<'EOF'
+          nothing to see
+          EOF
+          docker ps
+
+  bash-template-shell: # expect: runs `docker`
+    runs-on: *light
+    defaults:
+      run:
+        shell: python3 {0}
+    steps:
+      - shell: bash -euo pipefail {0}
+        run: docker ps
 
   compose: # expect: runs `docker-compose`
     runs-on: *light
@@ -216,6 +256,16 @@ jobs:
       verify: |
         python -m pip install -e .
         sh -c 'docker run --rm postgres:17 true'
+
+  caller-lowercase-owner: # expect: its test input runs `docker`
+    uses: tanksterai/.github/.github/workflows/node-ci.yml@v1
+    with:
+      test: docker compose up -d && npm test
+
+  caller-command-with-an-expression: # expect: its test input runs `docker`
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
+    with:
+      test: docker compose up -d && pnpm test ${{ matrix.shard }}
 
   matrix-label: # expect: strategy matrix
     strategy:

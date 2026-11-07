@@ -3,7 +3,16 @@
 # outside .github/workflows so nothing runs it.
 name: light-lane-pass
 
-on: workflow_call
+# The shared-workflow runs-on form needs a boolean light input.
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        default: ""
+      light:
+        type: boolean
+        default: true
 
 jobs:
   reusable-expression:
@@ -37,6 +46,32 @@ jobs:
           if ! command -v docker >/dev/null; then echo "no Docker here"; exit 0; fi
           which docker || type docker || hash docker
       - run: python3 -m unittest
+
+  scripts-that-are-not-shell:
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: python3 {0}
+    steps:
+      - name: Python, from the job's default shell
+        run: |
+          import shutil
+          docker = shutil.which("docker")
+          print(docker)
+      - name: PowerShell
+        shell: pwsh
+        run: |
+          kind = 'x'
+          docker ps
+      - name: A heredoc that only writes text
+        shell: bash -euo pipefail {0}
+        run: |
+          cat > notes.md <<'EOF'
+          docker run is not used here
+          kind create cluster
+          EOF
+          read -r first <<< "docker ps"
+          echo "${first}"
 
   plain-expression-other-spacing:
     runs-on: "${{(vars.CI_LIGHT_RUNNER=='tankster-light'&&format( 'tankster-light-{0}-{1}' , github.run_id , github.run_attempt ))||vars.CI_RUNNER||'ubuntu-latest'}}"
