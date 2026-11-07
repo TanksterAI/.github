@@ -51,9 +51,21 @@ on:
           Runner label. Empty (the default) follows the organisation's
           CI_RUNNER variable, which moves CI onto the Cloud Build fallback
           runner when the included Actions minutes run out, and means
-          ubuntu-latest when that variable is unset.
+          ubuntu-latest when that variable is unset. A value here also
+          overrides light.
         type: string
         default: ""
+      light:
+        description: >-
+          Run on the Cloud Run light runner, which has no Docker, once the
+          organisation opens the light lane (CI_LIGHT_RUNNER is
+          tankster-light). Until then, or when runs-on is set, it changes
+          nothing. This job runs your own commands, so pass false if they
+          need Docker (testcontainers, docker compose, ...). Left true, the
+          first Docker call fails with TANKSTER_LIGHT_NO_DOCKER and the
+          dispatcher re-runs the workflow on Cloud Build and remembers it.
+        type: boolean
+        default: true
       verify:
         description: Command proving the regenerated lockfile actually installs and builds.
         type: string
@@ -68,7 +80,13 @@ permissions:
 jobs:
   lockfile:
     name: Regenerate lockfile
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: write
