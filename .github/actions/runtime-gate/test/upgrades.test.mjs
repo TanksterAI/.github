@@ -124,9 +124,14 @@ test('signs up, signs in and crawls behind the login; coverage is reported', () 
   assert.ok(c.js && c.js.percent > 0 && c.js.percent < 100, `JS coverage between 0 and 100: ${JSON.stringify(c.js)}`);
   assert.match(fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8'), /\*\*Coverage:\*\*.*signed in as tester@example.com/);
 
-  // Against itself as the baseline: coverage delta is computed and is zero.
+  // Against itself as the baseline: every screenshot is decoded and compared,
+  // and the coverage delta is computed and is zero. The status check comes
+  // first so a crash shows its own stack, not a missing report.
   const again = run('crawl.mjs', { RG_URL: GOOD, ...LOGIN, RG_BASELINE_DIR: r.out, RG_INTERACT: 'false', RG_FORMS: 'false' });
+  assert.equal(again.status, 0, again.log);
   assert.equal(again.report.baseline, 'compared');
+  const unreadable = again.report.findings.filter((f) => f.kind === 'visual-diff-failed');
+  assert.deepEqual(unreadable, [], 'baseline screenshots can be decoded');
   assert.ok(again.report.coverageDelta, 'coverage delta against the baseline');
   assert.equal(again.report.coverageDelta.routesVisited, 0, JSON.stringify(again.report.coverageDelta));
 });
