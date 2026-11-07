@@ -15,6 +15,10 @@
 # fallback runner. A job that really must stay on a GitHub-hosted runner says
 # so with a `# hosted-only` comment on its runs-on line (or on the label).
 #
+# And it keeps the light lane honest: a job that asks for a tankster-light
+# runner (Cloud Run, no Docker) must ask with the run-bound label and must
+# not need Docker. See "Light lane" in the README.
+#
 # Nothing here pushes, so checkout does not keep the token, and the actions
 # are pinned to commit SHAs. The actionlint binary matches the runner's OS
 # (Linux or macOS) and architecture (x64 or arm64), and the cache key
@@ -29,9 +33,19 @@ on:
           Runner label. Empty (the default) follows the organisation's
           CI_RUNNER variable, which moves CI onto the Cloud Build fallback
           runner when the included Actions minutes run out, and means
-          ubuntu-latest when that variable is unset.
+          ubuntu-latest when that variable is unset. A value here also
+          overrides light.
         type: string
         default: ""
+      light:
+        description: >-
+          Run on the Cloud Run light runner, which has no Docker, once the
+          organisation opens the light lane (CI_LIGHT_RUNNER is
+          tankster-light). Until then, or when runs-on is set, it changes
+          nothing. Nothing in this workflow needs Docker; false keeps it off
+          the lane anyway.
+        type: boolean
+        default: true
       fallback-version:
         description: Used only if the GitHub API cannot be reached.
         type: string
@@ -57,7 +71,13 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -122,6 +142,440 @@ jobs:
           fi
         env:
           POLICY: ${{ inputs.runner-policy }}
+
+      # Jobs that ask for the light lane (a tankster-light label) must not
+      # need Docker, and must ask with the run-bound label. The check is the
+      # Python script in the third step, standard library only; its header
+      # says what it checks and what it cannot see. self-check.yml runs
+      # tests/light-lane against that exact script. A repository whose
+      # workflows never mention tankster-light skips all three, and the
+      # light runner's image has no Python, so it is set up only when needed.
+      - name: Find light jobs
+        id: light
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(.github/workflows/*.yml .github/workflows/*.yaml)
+          if [ "${#files[@]}" -gt 0 ] && grep -lq -- tankster-light "${files[@]}"; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No workflow here mentions tankster-light."
+          fi
+          if command -v python3 >/dev/null; then
+            echo "python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "python=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python for the light-lane lint
+        if: steps.light.outputs.found == 'true' && steps.light.outputs.python != 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Light jobs stay Docker-free
+        if: steps.light.outputs.found == 'true'
+        shell: python3 {0}
+        run: |
+          # Light-lane lint. Runs as this step's script (shell: python3 {0}), and
+          # self-check.yml extracts it to run tests/light-lane against it, the way it
+          # does with the runner guard above. Standard library only.
+          #
+          # A job asks for the light lane by putting a tankster-light label in its
+          # runs-on. A light runner is a Cloud Run job with no Docker daemon, and a
+          # runner takes any queued job whose labels match, so for every such job this
+          # fails when:
+          #   - the label is not the run-bound one, built by
+          #     format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)
+          #     inside an expression and gated by vars.CI_LIGHT_RUNNER ==
+          #     'tankster-light'. A fixed label would let one repository's light
+          #     runner take another's job.
+          #   - the job has services or a container, a step uses docker://, a run step
+          #     calls docker (or docker-compose, podman, nerdctl, buildah) as a
+          #     command, or a step uses an action whose action.yml says
+          #     runs.using: docker. Composite actions are followed into their steps.
+          # Action metadata is read through the GitHub API at the pinned ref, with
+          # the job's token. If it cannot be read the job fails (fail closed), except
+          # for the first-party actions in VERIFIED_NODE.
+          #
+          # Also fails when a light label is passed to a reusable workflow through
+          # with: runs-on (only that workflow knows whether its jobs need Docker; use
+          # its light input), or appears in a strategy matrix.
+          #
+          # Limits, so nobody reads more into a green run than it says: run scripts
+          # are matched as text, so a docker call hidden behind eval, a variable or a
+          # script file is not seen, and neither is Docker started by the caller's own
+          # commands (a test suite using testcontainers, say). Those are what the
+          # dispatcher's TANKSTER_LIGHT_NO_DOCKER fallback is for.
+          import glob
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          LIGHT = "tankster-light"
+          # The only places "tankster-light" may appear in a runs-on value.
+          LABEL_RE = re.compile(
+              r"format\(\s*'tankster-light-\{0\}-\{1\}'\s*,\s*github\.run_id\s*,"
+              r"\s*github\.run_attempt\s*\)"
+          )
+          GATE_RE = re.compile(
+              r"vars\.CI_LIGHT_RUNNER\s*==\s*'tankster-light'"
+              r"|'tankster-light'\s*==\s*vars\.CI_LIGHT_RUNNER"
+          )
+          # An expression is "$" followed by "{{ ... }}". Spelled in pieces so the
+          # runner never sees an expression in this script.
+          EXPR_RE = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+          # A container tool at a command position: start of a line, after ; & | ( `
+          # $( {, or after a word that runs its argument (sudo, exec, if, xargs ...),
+          # with options, VAR=value assignments and a directory allowed in between.
+          TOOLS = "|".join(("docker-compose", "docker", "podman", "nerdctl", "buildah"))
+          COMMAND_RE = re.compile(
+              r"(?:^|[;&|(`{]|\$\(|\b(?:sudo|exec|then|do|else|elif|if|while|until"
+              r"|time|command|nohup|xargs|env|watch|timeout)\s)"
+              r"\s*(?:-\S+\s+)*(?:\d+\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?"
+              r"(?P<tool>" + TOOLS + r")(?=$|[\s;&|)`])"
+          )
+          # First-party actions read and found to be node24 at the refs this estate
+          # pins (Nov 2026). Used only when their action.yml cannot be fetched.
+          VERIFIED_NODE = {
+              "actions/cache",
+              "actions/checkout",
+              "actions/download-artifact",
+              "actions/setup-node",
+              "actions/setup-python",
+              "actions/upload-artifact",
+          }
+          MAX_DEPTH = 5
+
+
+          class LoadError(Exception):
+              pass
+
+
+          def _yq():
+              """mikefarah yq v4, which workflows-lint already needs, or None."""
+              exe = shutil.which("yq")
+              if not exe:
+                  return None
+              try:
+                  out = subprocess.run(
+                      [exe, "--version"], capture_output=True, text=True, timeout=10
+                  )
+              except (OSError, subprocess.SubprocessError):
+                  return None
+              text = (out.stdout + out.stderr).lower()
+              if "mikefarah" in text or re.search(r"version v?4\.", text):
+                  return exe
+              return None
+
+
+          def load_yaml(text):
+              """Parse YAML with PyYAML if it is installed, else with yq v4."""
+              try:
+                  import yaml  # noqa: PLC0415 - optional
+              except ImportError:
+                  yaml = None
+              if yaml is not None:
+                  try:
+                      return yaml.safe_load(text)
+                  except yaml.YAMLError as err:
+                      raise LoadError(str(err).splitlines()[0]) from err
+              exe = _yq()
+              if exe is None:
+                  raise LoadError("needs PyYAML or yq v4 (mikefarah) to read YAML")
+              out = subprocess.run(
+                  [exe, "--header-preprocess=false", "-o=json", "-I0", ".", "-"],
+                  input=text,
+                  capture_output=True,
+                  text=True,
+                  timeout=30,
+              )
+              if out.returncode != 0:
+                  raise LoadError(out.stderr.strip().splitlines()[0] if out.stderr else "yq failed")
+              return json.loads(out.stdout) if out.stdout.strip() else None
+
+
+          def strings(value):
+              """Every string inside a YAML value."""
+              if isinstance(value, str):
+                  yield value
+              elif isinstance(value, dict):
+                  for item in value.values():
+                      yield from strings(item)
+              elif isinstance(value, list):
+                  for item in value:
+                      yield from strings(item)
+
+
+          def label_problems(runs_on):
+              """Why a runs-on value that mentions the light lane is not run-bound."""
+              problems = []
+              for value in strings(runs_on):
+                  if LIGHT not in value:
+                      continue
+                  labelled = gated = False
+                  rest = EXPR_RE.sub("", value)
+                  for expr in EXPR_RE.findall(value):
+                      labelled |= bool(LABEL_RE.search(expr))
+                      gated |= bool(GATE_RE.search(expr))
+                      rest += GATE_RE.sub("", LABEL_RE.sub("", expr))
+                  if LIGHT in rest:
+                      problems.append(
+                          "a light label must be built as format('tankster-light-{0}-{1}', "
+                          "github.run_id, github.run_attempt) inside an expression; a fixed "
+                          "or differently built label lets a light runner take another "
+                          "run's job"
+                      )
+                  elif not labelled:
+                      problems.append("runs-on tests the light lane but never asks for the run-bound label")
+                  elif not gated:
+                      problems.append(
+                          "the light label is not gated by vars.CI_LIGHT_RUNNER == "
+                          "'tankster-light', so the job ignores the organisation's switch"
+                      )
+              return problems
+
+
+          def strip_comment(line):
+              """Drop a shell (or Python) comment, minding quotes."""
+              quote = None
+              prev = " "
+              for i, ch in enumerate(line):
+                  if quote:
+                      if ch == quote and prev != "\\":
+                          quote = None
+                  elif ch in "'\"":
+                      quote = ch
+                  elif ch == "#" and prev.isspace():
+                      return line[:i]
+                  prev = ch
+              return line
+
+
+          def docker_commands(script):
+              """(line number, tool) for each container tool called as a command."""
+              hits = []
+              for number, line in enumerate(script.splitlines(), 1):
+                  match = COMMAND_RE.search(strip_comment(line))
+                  if match:
+                      hits.append((number, match.group("tool")))
+              return hits
+
+
+          class Resolver:
+              """Reads action metadata at a pinned ref through the GitHub API."""
+
+              def __init__(self, root=".", api=None, token=None):
+                  self.root = root
+                  self.api = (api or os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
+                  self.token = token if token is not None else (
+                      os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+                  )
+                  self.cache = {}
+
+              def _get(self, owner, repo, path, ref):
+                  quoted = "/".join(urllib.parse.quote(p) for p in path.split("/") if p)
+                  url = "{}/repos/{}/{}/contents/{}?ref={}".format(
+                      self.api, owner, repo, quoted, urllib.parse.quote(ref, safe="")
+                  )
+                  headers = {
+                      "Accept": "application/vnd.github.raw+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "tankster-light-lane-lint",
+                  }
+                  if self.token:
+                      headers["Authorization"] = "Bearer " + self.token
+                  last = "no response"
+                  for _ in range(2):
+                      try:
+                          with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as resp:
+                              return resp.read().decode("utf-8"), None
+                      except urllib.error.HTTPError as err:
+                          if err.code == 404:
+                              return None, "not found"
+                          last = "HTTP {}".format(err.code)
+                      except (urllib.error.URLError, OSError) as err:
+                          last = str(getattr(err, "reason", err))
+                  return None, last
+
+              def action(self, uses):
+                  """(metadata dict, None) or (None, reason it could not be read)."""
+                  if uses in self.cache:
+                      return self.cache[uses]
+                  result = self._action(uses)
+                  self.cache[uses] = result
+                  return result
+
+              def _action(self, uses):
+                  if "$" + "{{" in uses:
+                      return None, "the action is chosen by an expression"
+                  if uses.startswith("./"):
+                      for name in ("action.yml", "action.yaml"):
+                          path = os.path.join(self.root, uses[2:], name)
+                          if os.path.isfile(path):
+                              with open(path, encoding="utf-8") as handle:
+                                  text = handle.read()
+                              break
+                      else:
+                          return None, "no action.yml at " + uses
+                  else:
+                      target, _, ref = uses.partition("@")
+                      parts = target.split("/")
+                      if not ref or len(parts) < 2:
+                          return None, "not owner/repo[/path]@ref"
+                      owner, repo, sub = parts[0], parts[1], "/".join(parts[2:])
+                      text = reason = None
+                      for name in ("action.yml", "action.yaml"):
+                          text, reason = self._get(owner, repo, (sub + "/" + name) if sub else name, ref)
+                          if text is not None or reason != "not found":
+                              break
+                      if text is None:
+                          return None, reason
+                  try:
+                      data = load_yaml(text)
+                  except LoadError as err:
+                      return None, "its action.yml does not parse ({})".format(err)
+                  if not isinstance(data, dict):
+                      return None, "its action.yml is not a mapping"
+                  return data, None
+
+
+          def action_problems(uses, resolver, depth=0, seen=None):
+              """Why a step's `uses` cannot run without Docker."""
+              seen = set() if seen is None else seen
+              if uses.startswith("docker://"):
+                  return ["uses a Docker image ({})".format(uses)]
+              if uses in seen:
+                  return []
+              seen.add(uses)
+              if depth > MAX_DEPTH:
+                  return ["{}: composite actions nest deeper than {}; cannot check".format(uses, MAX_DEPTH)]
+              data, reason = resolver.action(uses)
+              if data is None:
+                  name = "/".join(uses.split("@")[0].split("/")[:2])
+                  if name in VERIFIED_NODE and not uses.startswith("./"):
+                      return []
+                  return [
+                      "could not read {}'s action.yml ({}); a light job may use only actions "
+                      "that can be shown not to need Docker. Fix access, or keep this job off "
+                      "the light lane".format(uses, reason)
+                  ]
+              runs = data.get("runs") or {}
+              using = str(runs.get("using", "")).strip().lower()
+              if using == "docker":
+                  return ["{} is a Docker action (runs.using: docker)".format(uses)]
+              if using.startswith("node"):
+                  return []
+              if using == "composite":
+                  problems = []
+                  for step in runs.get("steps") or []:
+                      if not isinstance(step, dict):
+                          continue
+                      if isinstance(step.get("run"), str):
+                          for line, tool in docker_commands(step["run"]):
+                              problems.append("{} runs `{}` (its step {!r}, line {})".format(
+                                  uses, tool, step.get("name", "?"), line))
+                      if isinstance(step.get("uses"), str):
+                          for problem in action_problems(step["uses"], resolver, depth + 1, seen):
+                              problems.append("{} -> {}".format(uses, problem))
+                  return problems
+              return ["{} has runs.using {!r}, which this lint does not know".format(uses, using or "(none)")]
+
+
+          def job_problems(job, resolver):
+              """Every reason one job cannot be a light job, or [] if it is not light."""
+              problems = []
+              runs_on = job.get("runs-on")
+              light = any(LIGHT in s for s in strings(runs_on)) if runs_on is not None else False
+              matrix = (job.get("strategy") or {}).get("matrix") if isinstance(job.get("strategy"), dict) else None
+              if any(LIGHT in s for s in strings(matrix)):
+                  problems.append("a light label in a strategy matrix cannot be run-bound; put it in runs-on")
+              with_ = job.get("with") if isinstance(job.get("with"), dict) else {}
+              if "uses" in job and any(LIGHT in s for s in strings(with_.get("runs-on"))):
+                  problems.append(
+                      "passes a light label to a reusable workflow through runs-on; only that "
+                      "workflow knows whether its jobs need Docker, so use its light input"
+                  )
+              if not light:
+                  return problems
+              problems.extend(label_problems(runs_on))
+              if "services" in job:
+                  problems.append("has services, which need Docker")
+              if "container" in job:
+                  problems.append("runs in a container, which needs Docker")
+              for index, step in enumerate(job.get("steps") or [], 1):
+                  if not isinstance(step, dict):
+                      continue
+                  name = step.get("name") or step.get("uses") or "step {}".format(index)
+                  if isinstance(step.get("run"), str):
+                      for line, tool in docker_commands(step["run"]):
+                          problems.append("step {!r} runs `{}` (line {} of its script)".format(name, tool, line))
+                  if isinstance(step.get("uses"), str):
+                      for problem in action_problems(step["uses"], resolver):
+                          problems.append("step {!r}: {}".format(name, problem))
+              return problems
+
+
+          def job_line(text, job_id):
+              lines = text.splitlines()
+              start = next((i for i, l in enumerate(lines) if re.match(r"^jobs\s*:", l)), 0)
+              pattern = re.compile(r"^\s+['\"]?" + re.escape(str(job_id)) + r"['\"]?\s*:")
+              for i in range(start, len(lines)):
+                  if pattern.match(lines[i]):
+                      return i + 1
+              return 1
+
+
+          def check_file(path, resolver):
+              """(light jobs, [(line, job, message)]) for one workflow file."""
+              with open(path, encoding="utf-8") as handle:
+                  text = handle.read()
+              if LIGHT not in text:
+                  return 0, []
+              try:
+                  data = load_yaml(text)
+              except LoadError as err:
+                  return 0, [(1, "-", "cannot read this file: {}".format(err))]
+              jobs = (data or {}).get("jobs") if isinstance(data, dict) else None
+              if not isinstance(jobs, dict):
+                  return 0, []
+              found = []
+              light = 0
+              for job_id, job in jobs.items():
+                  if not isinstance(job, dict):
+                      continue
+                  if any(LIGHT in s for s in strings(job.get("runs-on"))):
+                      light += 1
+                  for message in job_problems(job, resolver):
+                      found.append((job_line(text, job_id), job_id, message))
+              return light, found
+
+
+          def main(argv):
+              files = argv or sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
+              resolver = Resolver()
+              total = problems = 0
+              for path in files:
+                  light, found = check_file(path, resolver)
+                  total += light
+                  for line, job, message in found:
+                      problems += 1
+                      print("::error file={},line={},title=Light lane::Job '{}': {}".format(path, line, job, message))
+              print("{} light job(s) checked, {} problem(s)".format(total, problems))
+              return 1 if problems else 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Resolve latest actionlint
         id: resolve
