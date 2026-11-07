@@ -144,23 +144,27 @@ jobs:
           POLICY: ${{ inputs.runner-policy }}
 
       # Jobs that ask for the light lane (a tankster-light label) must not
-      # need Docker, and must ask with the run-bound label. The check is the
-      # Python script in the third step, standard library only; its header
-      # says what it checks and what it cannot see. self-check.yml runs
-      # tests/light-lane against that exact script. A repository whose
-      # workflows never mention tankster-light skips all three, and the
+      # need Docker, and must ask with the run-bound label; and calls to the
+      # shared workflows that run the caller's commands (node-ci, python-ci,
+      # lockfile: light by default) must not pass commands that use Docker.
+      # The check is the Python script in the third step, standard library
+      # only; its header says what it checks and what it cannot see.
+      # self-check.yml runs tests/light-lane against that exact script. A
+      # repository whose workflows have neither skips all three, and the
       # light runner's image has no Python, so it is set up only when needed.
       - name: Find light jobs
         id: light
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           files=(.github/workflows/*.yml .github/workflows/*.yaml)
-          if [ "${#files[@]}" -gt 0 ] && grep -lq -- tankster-light "${files[@]}"; then
+          pattern='tankster-light|(TanksterAI/\.github/|\./)\.github/workflows/(node-ci|python-ci|lockfile)\.ya?ml'
+          if [ "${#files[@]}" -gt 0 ] && grep -lqE -- "${pattern}" "${files[@]}"; then
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "No workflow here mentions tankster-light."
+            echo "No workflow here asks for the light lane or calls a shared workflow with your commands."
           fi
           if command -v python3 >/dev/null; then
             echo "python=true" >> "$GITHUB_OUTPUT"
@@ -169,13 +173,13 @@ jobs:
           fi
 
       - name: Set up Python for the light-lane lint
-        if: steps.light.outputs.found == 'true' && steps.light.outputs.python != 'true'
+        if: ${{ !cancelled() && steps.light.outputs.found == 'true' && steps.light.outputs.python != 'true' }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Light jobs stay Docker-free
-        if: steps.light.outputs.found == 'true'
+        if: ${{ !cancelled() && steps.light.outputs.found == 'true' }}
         shell: python3 {0}
         run: |
           # Light-lane lint. Runs as this step's script (shell: python3 {0}), and
@@ -186,61 +190,90 @@ jobs:
           # runs-on. A light runner is a Cloud Run job with no Docker daemon, and a
           # runner takes any queued job whose labels match, so for every such job this
           # fails when:
-          #   - the label is not the run-bound one, built by
-          #     format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)
-          #     inside an expression and gated by vars.CI_LIGHT_RUNNER ==
-          #     'tankster-light'. A fixed label would let one repository's light
-          #     runner take another's job.
+          #   - its runs-on is not exactly (whitespace aside) one of the two canonical
+          #     expressions in CANONICAL: the run-bound label, gated by the
+          #     organisation's switch. Anything else that mentions tankster-light
+          #     fails, so no job can ask with a fixed label or ignore the switch.
           #   - the job has services or a container, a step uses docker://, a run step
-          #     calls docker (or docker-compose, podman, nerdctl, buildah) as a
-          #     command, or a step uses an action whose action.yml says
-          #     runs.using: docker. Composite actions are followed into their steps.
-          # Action metadata is read through the GitHub API at the pinned ref, with
-          # the job's token. If it cannot be read the job fails (fail closed), except
-          # for the first-party actions in VERIFIED_NODE.
+          #     calls a container tool (TOOLS) as a command, a step uses a docker/*
+          #     action or one whose action.yml says runs.using: docker, or it gives
+          #     claude-code-action an mcp__github__ tool (which starts a container).
+          #     Composite actions are followed into their steps.
+          # A job that calls one of the shared workflows that run the caller's own
+          # commands (COMMAND_INPUTS) without light: false is checked too: those
+          # commands get the same run-step rules.
           #
-          # Also fails when a light label is passed to a reusable workflow through
-          # with: runs-on (only that workflow knows whether its jobs need Docker; use
-          # its light input), or appears in a strategy matrix.
+          # Action metadata is read through the GitHub API at the pinned ref, with the
+          # job's token. A 404, a refusal or metadata that does not parse fails the job
+          # (fail closed), except for the first-party actions in VERIFIED_NODE. A
+          # transient error (5xx, 429, a rate limit, the network) is retried with
+          # backoff and then only warned about: the runner's Docker shim and the
+          # dispatcher's re-run on Cloud Build are the backstop for that one action.
           #
           # Limits, so nobody reads more into a green run than it says: run scripts
-          # are matched as text, so a docker call hidden behind eval, a variable or a
-          # script file is not seen, and neither is Docker started by the caller's own
-          # commands (a test suite using testcontainers, say). Those are what the
-          # dispatcher's TANKSTER_LIGHT_NO_DOCKER fallback is for.
+          # are matched as text, so Docker reached through a script file, a package
+          # script (npm run ...), a variable or a library (testcontainers, say) is not
+          # seen, and nor is a runs-on that takes its label from a variable. The
+          # dispatcher's re-run on TANKSTER_LIGHT_NO_DOCKER and the socket errors is
+          # the fallback for what this cannot see.
           import glob
           import json
           import os
           import re
+          import shlex
           import shutil
           import subprocess
           import sys
+          import time
           import urllib.error
           import urllib.parse
           import urllib.request
 
           LIGHT = "tankster-light"
-          # The only places "tankster-light" may appear in a runs-on value.
-          LABEL_RE = re.compile(
-              r"format\(\s*'tankster-light-\{0\}-\{1\}'\s*,\s*github\.run_id\s*,"
-              r"\s*github\.run_attempt\s*\)"
-          )
-          GATE_RE = re.compile(
-              r"vars\.CI_LIGHT_RUNNER\s*==\s*'tankster-light'"
-              r"|'tankster-light'\s*==\s*vars\.CI_LIGHT_RUNNER"
-          )
-          # An expression is "$" followed by "{{ ... }}". Spelled in pieces so the
+          # An expression is "$" followed by "{{ ... }}"; built in pieces so the
           # runner never sees an expression in this script.
-          EXPR_RE = re.compile(r"\$\{\{(.*?)\}\}", re.S)
-          # A container tool at a command position: start of a line, after ; & | ( `
-          # $( {, or after a word that runs its argument (sudo, exec, if, xargs ...),
-          # with options, VAR=value assignments and a directory allowed in between.
-          TOOLS = "|".join(("docker-compose", "docker", "podman", "nerdctl", "buildah"))
-          COMMAND_RE = re.compile(
-              r"(?:^|[;&|(`{]|\$\(|\b(?:sudo|exec|then|do|else|elif|if|while|until"
-              r"|time|command|nohup|xargs|env|watch|timeout)\s)"
-              r"\s*(?:-\S+\s+)*(?:\d+\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*/)?"
-              r"(?P<tool>" + TOOLS + r")(?=$|[\s;&|)`])"
+          OPEN, CLOSE = "$" + "{{", "}}"
+          LABEL = "format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)"
+          GATE = "vars.CI_LIGHT_RUNNER == 'tankster-light'"
+          # The contract's two forms: shared reusable workflows, and a repository's
+          # own jobs (the same without the inputs).
+          CANONICAL = (
+              OPEN + " inputs.runs-on || (inputs.light && " + GATE + " && " + LABEL
+              + ") || vars.CI_RUNNER || 'ubuntu-latest' " + CLOSE,
+              OPEN + " (" + GATE + " && " + LABEL + ") || vars.CI_RUNNER || 'ubuntu-latest' " + CLOSE,
+          )
+          # Commands that need a container engine, and words that run the command
+          # after them (with their options) rather than being the command.
+          TOOLS = {
+              "docker", "docker-compose", "podman", "podman-compose", "nerdctl",
+              "buildah", "buildctl", "kind", "k3d", "minikube", "earthly", "act",
+              "dagger", "lima",
+          }
+          WRAPPERS = {
+              "sudo", "exec", "nice", "env", "time", "nohup", "timeout", "xargs",
+              "command", "stdbuf", "ionice", "chrt", "setsid", "watch", "unbuffer",
+              "then", "do", "else", "elif", "if", "while", "until", "!", "npx",
+          }
+          # Options of a wrapper that take the next word as their value.
+          VALUE_OPTIONS = {
+              "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"},
+              "nice": {"-n"},
+              "timeout": {"-k", "-s"},
+              "xargs": {"-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a"},
+              "env": {"-u", "-C", "-S"},
+              "ionice": {"-c", "-n", "-p"},
+              "watch": {"-n", "-d"},
+              "stdbuf": {"-i", "-o", "-e"},
+          }
+          SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
+          # Shared workflows whose inputs are the caller's own commands.
+          COMMAND_INPUTS = {
+              "node-ci.yml": ("install", "lint", "typecheck", "test", "build"),
+              "python-ci.yml": ("install", "extra-install", "verify", "sibling-install"),
+              "lockfile.yml": ("verify",),
+          }
+          SHARED_CALL_RE = re.compile(
+              r"^(?:TanksterAI/\.github/|\./)\.github/workflows/(?P<file>[\w.-]+\.ya?ml)(?:@\S+)?$"
           )
           # First-party actions read and found to be node24 at the refs this estate
           # pins (Nov 2026). Used only when their action.yml cannot be fetched.
@@ -314,73 +347,189 @@ jobs:
                       yield from strings(item)
 
 
+          def squeeze(text):
+              """Drop whitespace outside single-quoted literals."""
+              out, quoted = [], False
+              for ch in text:
+                  if ch == "'":
+                      quoted = not quoted
+                  if quoted or not ch.isspace():
+                      out.append(ch)
+              return "".join(out)
+
+
+          CANONICAL_SQUEEZED = {squeeze(c) for c in CANONICAL}
+
+
           def label_problems(runs_on):
-              """Why a runs-on value that mentions the light lane is not run-bound."""
-              problems = []
-              for value in strings(runs_on):
-                  if LIGHT not in value:
+              """Why a runs-on value that mentions the light lane is not canonical."""
+              if not any(LIGHT in s for s in strings(runs_on)):
+                  return []
+              if isinstance(runs_on, str) and squeeze(runs_on.strip()) in CANONICAL_SQUEEZED:
+                  return []
+              return [
+                  "a runs-on that mentions tankster-light must be exactly the shared-workflow "
+                  "form `{}` or, in a repository's own workflow, `{}` (whitespace aside). "
+                  "Anything else could ask for a light runner with a label another run's "
+                  "runner could take, or while the organisation has the lane closed".format(*CANONICAL)
+              ]
+
+
+          def _join_continuations(script):
+              lines, buf, first = [], "", None
+              for number, line in enumerate(script.splitlines(), 1):
+                  if first is None:
+                      first = number
+                  if line.endswith("\\"):
+                      buf += line[:-1] + " "
                       continue
-                  labelled = gated = False
-                  rest = EXPR_RE.sub("", value)
-                  for expr in EXPR_RE.findall(value):
-                      labelled |= bool(LABEL_RE.search(expr))
-                      gated |= bool(GATE_RE.search(expr))
-                      rest += GATE_RE.sub("", LABEL_RE.sub("", expr))
-                  if LIGHT in rest:
-                      problems.append(
-                          "a light label must be built as format('tankster-light-{0}-{1}', "
-                          "github.run_id, github.run_attempt) inside an expression; a fixed "
-                          "or differently built label lets a light runner take another "
-                          "run's job"
-                      )
-                  elif not labelled:
-                      problems.append("runs-on tests the light lane but never asks for the run-bound label")
-                  elif not gated:
-                      problems.append(
-                          "the light label is not gated by vars.CI_LIGHT_RUNNER == "
-                          "'tankster-light', so the job ignores the organisation's switch"
-                      )
-              return problems
+                  lines.append((first, buf + line))
+                  buf, first = "", None
+              if buf:
+                  lines.append((first, buf))
+              return lines
 
 
-          def strip_comment(line):
-              """Drop a shell (or Python) comment, minding quotes."""
-              quote = None
-              prev = " "
-              for i, ch in enumerate(line):
-                  if quote:
-                      if ch == quote and prev != "\\":
-                          quote = None
-                  elif ch in "'\"":
-                      quote = ch
-                  elif ch == "#" and prev.isspace():
-                      return line[:i]
-                  prev = ch
-              return line
+          def _words(text):
+              """Shell words of one line, with comments dropped; None if it will not split."""
+              lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>")
+              lexer.whitespace_split = True
+              lexer.commenters = "#"
+              try:
+                  return list(lexer)
+              except ValueError:
+                  return None
+
+
+          SEPARATORS = {";", "&", "&&", "|", "||", "|&", ";;", "(", ")", "{", "}", "\n"}
+
+
+          def _simple_commands(words):
+              current = []
+              for word in words:
+                  if word in SEPARATORS or set(word) <= set(";&|()"):
+                      if current:
+                          yield current
+                      current = []
+                  else:
+                      current.append(word)
+              if current:
+                  yield current
+
+
+          def _tool_of(command, depth=0):
+              """The container tool a simple command runs, or None."""
+              words = list(command)
+              while words:
+                  word = words[0]
+                  # A redirection (2>&1, >/dev/null, &> log), with its file descriptor
+                  # and its target, is not the command.
+                  if re.fullmatch(r"\d+", word) and len(words) > 1 and words[1][:1] in "<>":
+                      words = words[1:]
+                      continue
+                  if re.fullmatch(r"&?[<>]+&?-?", word):
+                      words = words[2:]
+                      continue
+                  if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+                      words = words[1:]
+                      continue
+                  name = word.rsplit("/", 1)[-1]
+                  if name == "command" and len(words) > 1 and words[1] in {"-v", "-V"}:
+                      return None  # `command -v docker`: asks whether Docker is there
+                  if name in {"pnpm", "yarn", "npm", "bun"} and len(words) > 1 and words[1] in {"exec", "dlx", "x"}:
+                      words = words[2:]
+                      continue
+                  if name == "eval" and depth < 3:
+                      return docker_tool(" ".join(words[1:]), depth + 1)
+                  if name in SHELLS and depth < 3:
+                      for i, flag in enumerate(words[1:], 1):
+                          if flag.startswith("-") and "c" in flag[1:] and i + 1 < len(words):
+                              return docker_tool(words[i + 1], depth + 1)
+                      return None
+                  if name in TOOLS:
+                      return "nerdctl" if name == "lima" else name
+                  if name in WRAPPERS:
+                      takes = VALUE_OPTIONS.get(name, set())
+                      words = words[1:]
+                      if name == "timeout" and words and re.fullmatch(r"[\d.]+[smhd]?", words[0]):
+                          words = words[1:]
+                      while words and words[0].startswith("-") and words[0] != "-":
+                          option = words[0]
+                          words = words[1:]
+                          if option in takes and words:
+                              words = words[1:]
+                          elif name == "exec" and option == "-a" and words:
+                              words = words[1:]
+                      continue
+                  return None
+              return None
+
+
+          def _substitutions(line):
+              """The text of each $( ... ) and ` ... ` in a line, quoted or not: a
+              command substitution runs even inside double quotes."""
+              for match in re.finditer(r"\$\(|`", line):
+                  rest = line[match.end():]
+                  if match.group() == "`":
+                      yield rest.split("`", 1)[0]
+                  else:
+                      depth = 1
+                      for i, ch in enumerate(rest):
+                          depth += {"(": 1, ")": -1}.get(ch, 0)
+                          if depth == 0:
+                              rest = rest[:i]
+                              break
+                      yield rest
+
+
+          def docker_tool(text, depth=0):
+              """The first container tool `text` runs as a command, or None."""
+              for _, line in _join_continuations(text):
+                  if depth < 3:
+                      for inner in _substitutions(line):
+                          tool = docker_tool(inner, depth + 1)
+                          if tool:
+                              return tool
+                  flat = line.replace("$(", " ( ").replace("`", " ( ")
+                  words = _words(flat)
+                  if words is None:
+                      # Unbalanced quotes: fall back to splitting on blanks.
+                      words = flat.split("#", 1)[0].split()
+                  for command in _simple_commands(words):
+                      tool = _tool_of(command, depth)
+                      if tool:
+                          return tool
+              return None
 
 
           def docker_commands(script):
-              """(line number, tool) for each container tool called as a command."""
+              """(line number, tool) for each line that runs a container tool."""
               hits = []
-              for number, line in enumerate(script.splitlines(), 1):
-                  match = COMMAND_RE.search(strip_comment(line))
-                  if match:
-                      hits.append((number, match.group("tool")))
+              for number, line in _join_continuations(script):
+                  tool = docker_tool(line)
+                  if tool:
+                      hits.append((number, tool))
               return hits
+
+
+          TRANSIENT = "transient"
 
 
           class Resolver:
               """Reads action metadata at a pinned ref through the GitHub API."""
 
-              def __init__(self, root=".", api=None, token=None):
+              def __init__(self, root=".", api=None, token=None, backoff=(2, 5)):
                   self.root = root
                   self.api = (api or os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
                   self.token = token if token is not None else (
                       os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
                   )
+                  self.backoff = backoff
                   self.cache = {}
+                  self.warnings = []
 
               def _get(self, owner, repo, path, ref):
+                  """(text, None), (None, "not found"), (None, reason) or (None, TRANSIENT + reason)."""
                   quoted = "/".join(urllib.parse.quote(p) for p in path.split("/") if p)
                   url = "{}/repos/{}/{}/contents/{}?ref={}".format(
                       self.api, owner, repo, quoted, urllib.parse.quote(ref, safe="")
@@ -393,28 +542,41 @@ jobs:
                   if self.token:
                       headers["Authorization"] = "Bearer " + self.token
                   last = "no response"
-                  for _ in range(2):
+                  for attempt in range(len(self.backoff) + 1):
+                      wait = None
                       try:
-                          with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as resp:
+                          request = urllib.request.Request(url, headers=headers)
+                          with urllib.request.urlopen(request, timeout=6) as resp:
                               return resp.read().decode("utf-8"), None
                       except urllib.error.HTTPError as err:
+                          with err:
+                              body = err.read(2000).decode("utf-8", "replace").lower()
+                              remaining = err.headers.get("X-RateLimit-Remaining")
+                              retry_after = err.headers.get("Retry-After")
                           if err.code == 404:
                               return None, "not found"
-                          last = "HTTP {}".format(err.code)
+                          limited = err.code == 429 or (
+                              err.code == 403 and (remaining == "0" or "rate limit" in body)
+                          )
+                          if err.code < 500 and not limited:
+                              return None, "HTTP {}".format(err.code)
+                          last = "HTTP {}{}".format(err.code, " (rate limited)" if limited else "")
+                          if retry_after and retry_after.isdigit():
+                              wait = min(int(retry_after), 10)
                       except (urllib.error.URLError, OSError) as err:
                           last = str(getattr(err, "reason", err))
-                  return None, last
+                      if attempt < len(self.backoff):
+                          time.sleep(self.backoff[attempt] if wait is None else wait)
+                  return None, TRANSIENT + ": " + last
 
               def action(self, uses):
                   """(metadata dict, None) or (None, reason it could not be read)."""
-                  if uses in self.cache:
-                      return self.cache[uses]
-                  result = self._action(uses)
-                  self.cache[uses] = result
-                  return result
+                  if uses not in self.cache:
+                      self.cache[uses] = self._action(uses)
+                  return self.cache[uses]
 
               def _action(self, uses):
-                  if "$" + "{{" in uses:
+                  if OPEN in uses:
                       return None, "the action is chosen by an expression"
                   if uses.startswith("./"):
                       for name in ("action.yml", "action.yaml"):
@@ -452,6 +614,9 @@ jobs:
               seen = set() if seen is None else seen
               if uses.startswith("docker://"):
                   return ["uses a Docker image ({})".format(uses)]
+              owner = uses.split("/", 1)[0].lower()
+              if owner == "docker":
+                  return ["{} is one of Docker's own actions, which drive a Docker daemon".format(uses)]
               if uses in seen:
                   return []
               seen.add(uses)
@@ -461,6 +626,12 @@ jobs:
               if data is None:
                   name = "/".join(uses.split("@")[0].split("/")[:2])
                   if name in VERIFIED_NODE and not uses.startswith("./"):
+                      return []
+                  if reason.startswith(TRANSIENT):
+                      resolver.warnings.append(
+                          "could not read {}'s action.yml ({}); not checked. If it needs Docker, the "
+                          "job fails on the light runner and is re-run on Cloud Build".format(uses, reason)
+                      )
                       return []
                   return [
                       "could not read {}'s action.yml ({}); a light job may use only actions "
@@ -489,13 +660,38 @@ jobs:
               return ["{} has runs.using {!r}, which this lint does not know".format(uses, using or "(none)")]
 
 
+          def _light_off(value):
+              return value is False or (isinstance(value, str) and value.strip().lower() == "false")
+
+
+          def caller_problems(job):
+              """For a job calling a shared workflow that runs the caller's commands."""
+              match = SHARED_CALL_RE.match(str(job.get("uses", "")).strip())
+              if not match or match.group("file") not in COMMAND_INPUTS:
+                  return False, []
+              with_ = job.get("with") if isinstance(job.get("with"), dict) else {}
+              if _light_off(with_.get("light")) or str(with_.get("runs-on") or "").strip():
+                  return False, []
+              problems = []
+              for name in COMMAND_INPUTS[match.group("file")]:
+                  value = with_.get(name)
+                  if not isinstance(value, str) or OPEN in value:
+                      continue
+                  for line, tool in docker_commands(value):
+                      problems.append(
+                          "calls {} with light on (the default), and its {} input runs `{}` "
+                          "(line {}); pass light: false".format(match.group("file"), name, tool, line)
+                      )
+              return True, problems
+
+
           def job_problems(job, resolver):
               """Every reason one job cannot be a light job, or [] if it is not light."""
               problems = []
               runs_on = job.get("runs-on")
-              light = any(LIGHT in s for s in strings(runs_on)) if runs_on is not None else False
-              matrix = (job.get("strategy") or {}).get("matrix") if isinstance(job.get("strategy"), dict) else None
-              if any(LIGHT in s for s in strings(matrix)):
+              light = any(LIGHT in s for s in strings(runs_on))
+              strategy = job.get("strategy") if isinstance(job.get("strategy"), dict) else {}
+              if any(LIGHT in s for s in strings(strategy.get("matrix"))):
                   problems.append("a light label in a strategy matrix cannot be run-bound; put it in runs-on")
               with_ = job.get("with") if isinstance(job.get("with"), dict) else {}
               if "uses" in job and any(LIGHT in s for s in strings(with_.get("runs-on"))):
@@ -503,6 +699,7 @@ jobs:
                       "passes a light label to a reusable workflow through runs-on; only that "
                       "workflow knows whether its jobs need Docker, so use its light input"
                   )
+              problems.extend(caller_problems(job)[1])
               if not light:
                   return problems
               problems.extend(label_problems(runs_on))
@@ -517,9 +714,17 @@ jobs:
                   if isinstance(step.get("run"), str):
                       for line, tool in docker_commands(step["run"]):
                           problems.append("step {!r} runs `{}` (line {} of its script)".format(name, tool, line))
-                  if isinstance(step.get("uses"), str):
-                      for problem in action_problems(step["uses"], resolver):
+                  uses = step.get("uses")
+                  if isinstance(uses, str):
+                      for problem in action_problems(uses, resolver):
                           problems.append("step {!r}: {}".format(name, problem))
+                      if uses.lower().startswith("anthropics/claude-code-action") and any(
+                          "mcp__github__" in s for s in strings(step.get("with"))
+                      ):
+                          problems.append(
+                              "step {!r} gives claude-code-action an mcp__github__ tool, which makes "
+                              "it start the GitHub MCP server in a Docker container".format(name)
+                          )
               return problems
 
 
@@ -533,11 +738,18 @@ jobs:
               return 1
 
 
+          def needs_check(text):
+              """Whether a file can hold anything this lint checks."""
+              return LIGHT in text or any(
+                  "/workflows/" + name in text for name in COMMAND_INPUTS
+              )
+
+
           def check_file(path, resolver):
               """(light jobs, [(line, job, message)]) for one workflow file."""
               with open(path, encoding="utf-8") as handle:
                   text = handle.read()
-              if LIGHT not in text:
+              if not needs_check(text):
                   return 0, []
               try:
                   data = load_yaml(text)
@@ -551,7 +763,7 @@ jobs:
               for job_id, job in jobs.items():
                   if not isinstance(job, dict):
                       continue
-                  if any(LIGHT in s for s in strings(job.get("runs-on"))):
+                  if any(LIGHT in s for s in strings(job.get("runs-on"))) or caller_problems(job)[0]:
                       light += 1
                   for message in job_problems(job, resolver):
                       found.append((job_line(text, job_id), job_id, message))
@@ -568,6 +780,8 @@ jobs:
                   for line, job, message in found:
                       problems += 1
                       print("::error file={},line={},title=Light lane::Job '{}': {}".format(path, line, job, message))
+              for warning in resolver.warnings:
+                  print("::warning title=Light lane::" + warning)
               print("{} light job(s) checked, {} problem(s)".format(total, problems))
               return 1 if problems else 0
 
