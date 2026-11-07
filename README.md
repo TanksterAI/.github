@@ -136,23 +136,24 @@ opens the lane too, and a repository variable of the same name overrides the
 organisation's for that repository, so none should exist.
 
 **Which shared workflows use it.** Each Docker-free one has a `light` input,
-default `true`:
+default `true` except where the table says otherwise:
 
 | Workflow | Light lane | Why |
 |---|---|---|
-| `node-ci.yml`, `python-ci.yml`, `rust-ci.yml`, `lockfile.yml` | yes | Docker-free, but they run your commands (`test`, `verify`, ...): see opting out |
-| `workflows-lint.yml`, `runtime-gate-flows.yml`, `auto-merge-gate.yml`, `claude-address-feedback.yml`, `conflict-sweep.yml` | yes | nothing in them needs Docker |
+| `node-ci.yml`, `python-ci.yml`, `rust-ci.yml`, `lockfile.yml` | yes | Docker-free, but they run your commands (`test`, `verify`, ...): see opting out and egress |
+| `workflows-lint.yml`, `runtime-gate-flows.yml`, `auto-merge-gate.yml` | yes | nothing in them needs Docker, and they send little |
+| `claude-address-feedback.yml`, `conflict-sweep.yml` | off by default (`light: true` opts in) | no Docker, but every model request resends the conversation, so a long session can pass the egress limit, and the re-run on Cloud Build would repeat the session: its model usage, and any pushes or comments the first attempt made. Turn it on only once their egress has been measured |
 | `security.yml` | no | `osv-scanner-action` is a Docker action |
 | `runtime-gate.yml` | no | runs Postgres, and in `mode: docker` the app, with `docker` |
 | `lighthouse-ci.yml` | not yet | no Docker, but Chrome, its system libraries and Lighthouse's CPU-sensitive scores have not been tried on a 1-vCPU Cloud Run runner |
 | `claude-review.yml` | no | retired |
 
-**Opting out.** A caller whose own commands need Docker passes
-`light: false`. Setting `runs-on` also takes a job off the lane. If a caller
-does neither, a Docker call on a light runner fails the job, and the
-dispatcher re-runs the workflow on Cloud Build and records it in
-`CI_LIGHT_DOCKER`, so its light jobs go to Cloud Build from then on. That works
-when the failed job's log shows one of:
+**Opting out.** A caller whose own commands need Docker, or upload a lot (see
+egress below), passes `light: false`. Setting `runs-on` also takes a job off
+the lane. If a caller does neither, a Docker call on a light runner fails the
+job, and the dispatcher re-runs the run's failed jobs on Cloud Build and
+records the workflow in `CI_LIGHT_DOCKER`, so its light jobs go to Cloud Build
+from then on. That works when the failed job's log shows one of:
 
 - `TANKSTER_LIGHT_NO_DOCKER`, which the runner's `docker` and
   `docker-compose` print;
@@ -162,6 +163,27 @@ when the failed job's log shows one of:
 
 Anything else that needs Docker must pass `light: false`: a tool that gives up
 with some other message fails the job and is not re-run.
+
+**Egress.** Cloud Run's internet egress is free for 1 GiB a month, then billed,
+so the runner image meters what each job sends. A light job that sends more
+than 64 MiB (the image's default `EGRESS_LIMIT_BYTES`) is stopped from
+outside. Everything a job uploads counts: cache saves, artifact uploads,
+`git push`, deployments and requests to APIs, a model's API included.
+Downloads (checkout, installs, cache restores) do not. The runner's execution
+then exits with code 70, and the dispatcher records the workflow in
+`CI_LIGHT_DOCKER` with the reason `egress` and re-runs the run's failed jobs
+on Cloud Build. In GitHub the stopped job just fails, as a lost runner does;
+the `TANKSTER_LIGHT_EGRESS` line is in the Cloud Run execution's log, not the
+job's.
+
+The shared workflows keep their own uploads off the light runner (its runner
+names start `crj-`): node-ci restores its dependency cache read-only and
+never saves it, rust-ci's `rust-cache` restores but does not save,
+workflows-lint does not save its actionlint cache, and lockfile turns
+setup-node's cache off there. node-ci's build artifact (`artifact-name`) is
+still uploaded, because callers download it in a later job: a caller whose
+artifact is large passes `light: false`. So do jobs that upload coverage
+reports, push images or deploy.
 
 **Your own workflows.** A job in a consuming repo that needs no Docker joins
 the lane with exactly this `runs-on` (the lint accepts no other form):
@@ -176,6 +198,12 @@ The shared workflows use the same thing with their inputs in front:
 ${{ inputs.runs-on || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
 ```
 
+A reusable workflow of your own that uses this second form must declare
+`light` under `on.workflow_call.inputs` with `type: boolean`. From a `string`
+input, `'false'` is a non-empty string, which is true, so the job would take
+the lane anyway; the lint fails the second form in a workflow without a
+boolean `light` input.
+
 **The lint.** `workflows-lint.yml`'s "Light jobs stay Docker-free" step
 checks every job whose `runs-on` mentions `tankster-light`, and fails it when:
 
@@ -183,12 +211,17 @@ checks every job whose `runs-on` mentions `tankster-light`, and fails it when:
   aside). That is what binds the label to the run and to the organisation's
   switch, so no other form is accepted;
 - it has `services` or a `container`, or a step uses `docker://`;
-- a `run` step calls a container tool as a command (`docker`,
-  `docker-compose`, `podman`, `nerdctl`, `buildah`, `buildctl`, `kind`, `k3d`,
-  `minikube`, `earthly`, `act`, `dagger`), including after `sudo`, `env`,
-  `nice`, `exec`, `!`, `if`, `xargs`, `eval`, inside `$( )` and in
-  `sh -c '...'`. Guards such as `command -v docker`, `which docker`,
-  `type docker` and `hash docker` are fine;
+- it uses the shared-workflow form in a workflow without a boolean `light`
+  input (see above);
+- a shell `run` step (bash, sh or the default shell) calls a container tool
+  as a command (`docker`, `docker-compose`, `podman`, `nerdctl`, `buildah`,
+  `buildctl`, `kind`, `k3d`, `minikube`, `earthly`, `act`, `dagger`),
+  including after `sudo`, `env`, `nice`, `exec`, `!`, `if`, `xargs`, `eval`,
+  inside `$( )` and in `sh -c '...'`. Guards such as `command -v docker`,
+  `which docker`, `type docker` and `hash docker` are fine. A step whose
+  shell is `python`, `pwsh` or anything else is not read as shell, and a
+  heredoc body is skipped unless a shell reads it (`bash <<EOF`,
+  `cat <<EOF | sh`);
 - a step uses one of Docker's own `docker/*` actions (setup-buildx,
   build-push, login, setup-qemu, bake, compose...), or an action whose
   `action.yml`, read through the GitHub API at the pinned ref with the job's
@@ -197,14 +230,17 @@ checks every job whose `runs-on` mentions `tankster-light`, and fails it when:
   fails the job, except the first-party `actions/*` ones checked to be node
   actions. A transient error (5xx, 429, a rate limit, the network) is tried
   three times, 2 and then 5 seconds apart (or as `Retry-After` says, up to
-  10), and then only warned about;
+  10), and then only warned about. After one action has ended that way, the
+  rest are tried once each, so an outage costs seconds, not minutes;
 - a step gives `anthropics/claude-code-action` an `mcp__github__` tool: the
   action runs that MCP server in a Docker container.
 
 It also checks a job that calls `node-ci.yml`, `python-ci.yml` or
 `lockfile.yml` without `light: false` or `runs-on`: their command inputs
 (`install`, `test`, `verify`, ...) are your commands on a light runner, so
-they get the same `run` rules. And it fails a light label passed to a
+they get the same `run` rules, with each expression in them read as one
+plain word. Owners and labels are matched without regard to case, as GitHub
+matches them. And it fails a light label passed to a
 reusable workflow through `with: runs-on` (use its `light` input: only that
 workflow knows whether its jobs need Docker) or put in a strategy matrix.
 Repositories whose workflows do neither are skipped without being parsed. The
@@ -212,16 +248,21 @@ script is the step's own `run:` block; `self-check.yml` runs
 `tests/light-lane` against it.
 
 What it cannot see: Docker reached through a script file, a package script
-(`npm run ...`), a variable or a library such as testcontainers; and a
-`runs-on` that takes its label from a variable, which has no `tankster-light`
-in it to find. The dispatcher's re-run above covers the first only for the
-messages listed.
+(`npm run ...`), a variable or a library such as testcontainers; a `runs-on`
+that takes its label from a variable, which has no `tankster-light` in it to
+find; and how much a job uploads. The dispatcher's re-runs above cover the
+first only for the messages listed, and the last through the egress stop.
+
+On a runner without shellcheck (the light runner, the Cloud Build image),
+actionlint skips its shellcheck pass without saying so; workflows-lint
+prints a warning when that happens, and the `run:` blocks are checked
+wherever shellcheck is installed, GitHub-hosted runners included.
 
 **Short jobs.** Every light job pays a Cloud Run start and a runner
 registration out of a free pool of roughly 1,500 to 2,000 minutes a month.
 That cost has not been measured yet. If it turns out to dominate jobs of a
-few seconds (the `credentials` checks, `auto-merge-gate`), those are better
-passed `light: false`.
+few seconds (`auto-merge-gate`, say), those are better passed
+`light: false`.
 
 **If the dispatcher stops.** While the lane is open, light jobs wait for the
 dispatcher. If it is paused or down (for example after the GCP spend cap

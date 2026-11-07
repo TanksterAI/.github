@@ -81,11 +81,15 @@ on:
         description: >-
           Run on the Cloud Run light runner, which has no Docker, once the
           organisation opens the light lane (CI_LIGHT_RUNNER is
-          tankster-light). Until then, or when runs-on is set, it changes
-          nothing. Nothing in this workflow needs Docker; false keeps it off
-          the lane anyway.
+          tankster-light) and runs-on is empty. Off by default: every model
+          request resends the conversation, so a long session can send more
+          than the 64 MiB the light runner allows a job. The runner then
+          stops it and the dispatcher re-runs it on Cloud Build, which
+          repeats the session: its model usage, and any pushes or comments
+          the first attempt already made. Nothing here needs Docker; set
+          true only once this workflow's egress has been measured.
         type: boolean
-        default: true
+        default: false
       allowed-bots:
         description: >-
           Comma-separated bot logins allowed to trigger this workflow. Add a

@@ -33,8 +33,9 @@ on:
           Run on the Cloud Run light runner, which has no Docker, once the
           organisation opens the light lane (CI_LIGHT_RUNNER is
           tankster-light). Until then, or when runs-on is set, it changes
-          nothing. Nothing in this workflow needs Docker; false keeps it off
-          the lane anyway.
+          nothing. Nothing in this workflow needs Docker, and it sends far
+          less than the 64 MiB the light runner allows a job; false keeps
+          it off the lane anyway.
         type: boolean
         default: true
       merge-method:
