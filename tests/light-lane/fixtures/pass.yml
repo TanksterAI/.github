@@ -1,0 +1,119 @@
+# Jobs the light-lane lint must accept. test_light_lane_lint.py runs the lint
+# over this file and expects no problems at all. Not a real workflow: it lives
+# outside .github/workflows so nothing runs it.
+name: light-lane-pass
+
+# The shared-workflow runs-on form needs a boolean light input.
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        default: ""
+      light:
+        type: boolean
+        default: true
+
+jobs:
+  reusable-expression:
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: example/node-action@1111111111111111111111111111111111111111
+      - uses: example/yaml-ext@7777777777777777777777777777777777777777
+      - uses: example/composite-ok@2222222222222222222222222222222222222222
+      - uses: ./local-ok
+      - name: Words, not commands
+        run: |
+          # docker run in a comment is fine
+          echo "docker is just a word here"
+          echo docker
+          cat Dockerfile
+          export DOCKER_HOST=unused
+          make docker-up
+          npm run docker:up
+          npm test
+
+  plain-expression:
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - name: Skip cleanly where there is no Docker
+        run: |
+          if ! command -v docker >/dev/null; then echo "no Docker here"; exit 0; fi
+          which docker || type docker || hash docker
+      - run: python3 -m unittest
+
+  scripts-that-are-not-shell:
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: python3 {0}
+    steps:
+      - name: Python, from the job's default shell
+        run: |
+          import shutil
+          docker = shutil.which("docker")
+          print(docker)
+      - name: PowerShell
+        shell: pwsh
+        run: |
+          kind = 'x'
+          docker ps
+      - name: A heredoc that only writes text
+        shell: bash -euo pipefail {0}
+        run: |
+          cat > notes.md <<'EOF'
+          docker run is not used here
+          kind create cluster
+          EOF
+          read -r first <<< "docker ps"
+          echo "${first}"
+
+  plain-expression-other-spacing:
+    runs-on: "${{(vars.CI_LIGHT_RUNNER=='tankster-light'&&format( 'tankster-light-{0}-{1}' , github.run_id , github.run_attempt ))||vars.CI_RUNNER||'ubuntu-latest'}}"
+    steps:
+      - run: echo ok
+
+  first-party-action-unreadable:
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      # Not recorded, so it cannot be read; first-party and verified node.
+      - uses: actions/setup-node@0000000000000000000000000000000000000000
+
+  not-light-may-use-docker:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    services:
+      db:
+        image: postgres:17
+    container: node:22
+    steps:
+      - uses: docker://alpine:3
+      - uses: example/docker-action@3333333333333333333333333333333333333333
+      - uses: docker/setup-buildx-action@v4
+      - run: docker compose up -d
+
+  caller-turns-light-off:
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
+    with:
+      light: false
+      test: docker compose up -d && npm test
+
+  caller-pins-a-runner:
+    uses: TanksterAI/.github/.github/workflows/python-ci.yml@v1
+    with:
+      runs-on: ubuntu-latest
+      verify: docker compose run app pytest
+
+  caller-commands-without-docker:
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
+    with:
+      install: npm ci
+      test: npm test -- --coverage
+      build: ${{ inputs.build }}
+
+  caller-of-a-workflow-without-command-inputs:
+    uses: TanksterAI/.github/.github/workflows/rust-ci.yml@v1

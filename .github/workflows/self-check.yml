@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   presets:
-    name: Renovate presets and runner guard
+    name: Renovate presets, runner guard and light-lane lint
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -103,6 +103,20 @@ jobs:
             exit 1
           fi
           echo "ok  $(wc -l < "${RUNNER_TEMP}/want") expected findings, no others"
+
+      # The light-lane lint's script, taken straight from workflows-lint.yml
+      # like the guard above, against tests/light-lane: passing and failing
+      # fixtures, a stand-in for the GitHub API, and the check that a closed
+      # lane leaves every job on the runner it had before.
+      - name: Test the light-lane lint
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          export LIGHT_LANE_LINT="${RUNNER_TEMP}/light_lane_lint.py"
+          yq '.jobs.actionlint.steps[] | select(.name == "Light jobs stay Docker-free") | .run' \
+            .github/workflows/workflows-lint.yml > "${LIGHT_LANE_LINT}"
+          test -s "${LIGHT_LANE_LINT}"
+          python3 -m unittest discover -s tests/light-lane -v
 
   # The whole reusable workflow, as consumers get it, over this repository.
   workflows-lint:

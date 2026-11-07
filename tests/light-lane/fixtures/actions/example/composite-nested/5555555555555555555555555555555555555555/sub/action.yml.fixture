@@ -1,0 +1,5 @@
+name: composite wrapping a Docker action
+runs:
+  using: composite
+  steps:
+    - uses: example/docker-action@3333333333333333333333333333333333333333

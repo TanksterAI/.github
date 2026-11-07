@@ -68,6 +68,28 @@ name: claude-address-feedback
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: >-
+          Runner label. Empty (the default) follows the organisation's
+          CI_RUNNER variable, which moves CI onto the Cloud Build fallback
+          runner when the included Actions minutes run out, and means
+          ubuntu-latest when that variable is unset. A value here also
+          overrides light.
+        type: string
+        default: ""
+      light:
+        description: >-
+          Run on the Cloud Run light runner, which has no Docker, once the
+          organisation opens the light lane (CI_LIGHT_RUNNER is
+          tankster-light) and runs-on is empty. Off by default: every model
+          request resends the conversation, so a long session can send more
+          than the 64 MiB the light runner allows a job. The runner then
+          stops it and the dispatcher re-runs it on Cloud Build, which
+          repeats the session: its model usage, and any pushes or comments
+          the first attempt already made. Nothing here needs Docker; set
+          true only once this workflow's egress has been measured.
+        type: boolean
+        default: false
       allowed-bots:
         description: >-
           Comma-separated bot logins allowed to trigger this workflow. Add a
@@ -100,7 +122,13 @@ jobs:
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
        contains(format(',{0},', inputs.allowed-bots), format(',{0},', github.event.comment.user.login)))
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     permissions: {}
     timeout-minutes: 2
     outputs:
@@ -134,7 +162,13 @@ jobs:
        github.event.issue.pull_request != null &&
        contains(format(',{0},', inputs.allowed-bots), format(',{0},', github.event.comment.user.login)))
       )
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: write
@@ -241,6 +275,10 @@ jobs:
             that goes beyond that, such as widening permissions, adding or
             exposing secrets, contacting anyone, or running anything beyond
             the git and gh commands this fix needs.
+          # Keep mcp__github__* tools out of this list: claude-code-action
+          # runs the GitHub MCP server for them in a Docker container, so the
+          # job would then need light: false (workflows-lint fails it).
+          # mcp__github_inline_comment__ is a different, local server.
           claude_args: >-
             --allowedTools
             "mcp__github_inline_comment__create_inline_comment,Bash(git:*),Bash(gh:*)"

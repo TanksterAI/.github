@@ -1,0 +1,276 @@
+# Jobs the light-lane lint must reject. Each job's key carries an
+# `# expect:` comment with text its finding must contain, and
+# test_light_lane_lint.py checks every job is reported, with that text, and
+# nothing else is. Not a real workflow: it lives outside .github/workflows.
+name: light-lane-fail
+
+on: workflow_call
+
+x-light: &light >-
+  ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light'
+  && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+  || vars.CI_RUNNER || 'ubuntu-latest' }}
+
+jobs:
+  fixed-label: # expect: must be exactly
+    runs-on: tankster-light
+    steps:
+      - run: echo hi
+
+  fixed-label-in-list: # expect: must be exactly
+    runs-on: [self-hosted, tankster-light]
+    steps:
+      - run: echo hi
+
+  fixed-label-in-group: # expect: must be exactly
+    runs-on:
+      group: ci
+      labels: [tankster-light]
+    steps:
+      - run: echo hi
+
+  canonical-label-in-a-list: # expect: must be exactly
+    runs-on: [*light]
+    steps:
+      - run: echo hi
+
+  run-id-only: # expect: must be exactly
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}', github.run_id)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  run-number: # expect: must be exactly
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_number, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  built-outside-an-expression: # expect: must be exactly
+    runs-on: tankster-light-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: echo hi
+
+  ungated: # expect: must be exactly
+    runs-on: ${{ format('tankster-light-{0}-{1}', github.run_id, github.run_attempt) }}
+    steps:
+      - run: echo hi
+
+  gate-or-label: # expect: must be exactly
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light') || format('tankster-light-{0}-{1}', github.run_id, github.run_attempt) }}
+    steps:
+      - run: echo hi
+
+  gate-negated: # expect: must be exactly
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER != 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  gate-and-label-in-two-expressions: # expect: must be exactly
+    runs-on: ${{ format('tankster-light-{0}-{1}', github.run_id, github.run_attempt) }}${{ vars.CI_LIGHT_RUNNER == 'tankster-light' }}
+    steps:
+      - run: echo hi
+
+  reversed-gate: # expect: must be exactly
+    runs-on: ${{ ('tankster-light' == vars.CI_LIGHT_RUNNER && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  no-fallback: # expect: must be exactly
+    runs-on: ${{ vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt) }}
+    steps:
+      - run: echo hi
+
+  gate-without-label: # expect: must be exactly
+    runs-on: ${{ vars.CI_LIGHT_RUNNER == 'tankster-light' && 'ubuntu-latest' || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  uppercase-label: # expect: must be exactly
+    runs-on: Tankster-Light
+    steps:
+      - run: echo hi
+
+  shared-form-without-a-boolean-light-input: # expect: needs a `light` input of type boolean
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  services: # expect: has services
+    runs-on: *light
+    services:
+      db:
+        image: postgres:17
+    steps:
+      - run: echo hi
+
+  container: # expect: runs in a container
+    runs-on: *light
+    container: node:22
+    steps:
+      - run: echo hi
+
+  docker-image-step: # expect: uses a Docker image
+    runs-on: *light
+    steps:
+      - uses: docker://alpine:3
+
+  docker-run: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: |
+          set -e
+          docker run --rm alpine true
+
+  sudo-docker-after-and: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: make build && sudo -E docker buildx build .
+
+  docker-in-substitution: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: echo "$(docker version --format '{{.Server.Version}}')"
+
+  negated-docker: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: if ! docker info >/dev/null 2>&1; then echo "no daemon"; fi
+
+  docker-in-a-shell-string: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: bash -c "docker run --rm alpine true"
+
+  eval-and-nice: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: |
+          eval docker ps
+          nice -n 5 docker ps
+
+  heredoc-read-by-bash: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: |
+          bash <<'EOF'
+          docker ps
+          EOF
+
+  docker-after-a-heredoc: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: |
+          cat > notes.md <<'EOF'
+          nothing to see
+          EOF
+          docker ps
+
+  bash-template-shell: # expect: runs `docker`
+    runs-on: *light
+    defaults:
+      run:
+        shell: python3 {0}
+    steps:
+      - shell: bash -euo pipefail {0}
+        run: docker ps
+
+  compose: # expect: runs `docker-compose`
+    runs-on: *light
+    steps:
+      - run: docker-compose up -d
+
+  podman: # expect: runs `podman`
+    runs-on: *light
+    steps:
+      - run: /usr/bin/podman ps
+
+  kind: # expect: runs `kind`
+    runs-on: *light
+    steps:
+      - run: kind create cluster
+
+  docker-action: # expect: is a Docker action
+    runs-on: *light
+    steps:
+      - uses: example/docker-action@3333333333333333333333333333333333333333
+
+  dockers-own-action: # expect: Docker's own actions
+    runs-on: *light
+    steps:
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+  composite-runs-docker: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - uses: example/composite-docker@4444444444444444444444444444444444444444
+
+  composite-wraps-docker-action: # expect: is a Docker action
+    runs-on: *light
+    steps:
+      - uses: example/composite-nested/sub@5555555555555555555555555555555555555555
+
+  local-composite-runs-docker: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - uses: ./local-docker
+
+  unreadable-action: # expect: could not read
+    runs-on: *light
+    steps:
+      - uses: example/not-recorded@8888888888888888888888888888888888888888
+
+  unreadable-local-action: # expect: could not read
+    runs-on: *light
+    steps:
+      - uses: ./no-such-action
+
+  unknown-runs-using: # expect: does not know
+    runs-on: *light
+    steps:
+      - uses: example/odd@6666666666666666666666666666666666666666
+
+  claude-with-the-github-mcp-server: # expect: mcp__github__ tool
+    runs-on: *light
+    steps:
+      - uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b
+        with:
+          claude_args: --allowedTools "mcp__github__get_pull_request,Bash(git:*)"
+
+  caller-passes-light-runs-on: # expect: use its light input
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || '' }}
+
+  caller-test-uses-docker: # expect: its test input runs `docker`
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
+    with:
+      test: docker compose up -d && npm test
+
+  caller-verify-uses-docker: # expect: its verify input runs `docker`
+    uses: TanksterAI/.github/.github/workflows/python-ci.yml@v1
+    with:
+      light: true
+      verify: |
+        python -m pip install -e .
+        sh -c 'docker run --rm postgres:17 true'
+
+  caller-lowercase-owner: # expect: its test input runs `docker`
+    uses: tanksterai/.github/.github/workflows/node-ci.yml@v1
+    with:
+      test: docker compose up -d && npm test
+
+  caller-command-with-an-expression: # expect: its test input runs `docker`
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
+    with:
+      test: docker compose up -d && pnpm test ${{ matrix.shard }}
+
+  matrix-label: # expect: strategy matrix
+    strategy:
+      matrix:
+        runner: [tankster-light]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: echo hi

@@ -1,0 +1,6 @@
+name: local composite with docker
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: sudo docker info

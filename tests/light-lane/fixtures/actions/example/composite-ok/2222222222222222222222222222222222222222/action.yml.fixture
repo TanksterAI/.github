@@ -1,0 +1,10 @@
+name: composite, no Docker
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        # docker is only mentioned in this comment
+        echo "no docker here"
+        npm ci
+    - uses: example/node-action@1111111111111111111111111111111111111111
