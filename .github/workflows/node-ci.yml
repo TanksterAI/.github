@@ -43,11 +43,17 @@ on:
           organisation opens the light lane (CI_LIGHT_RUNNER is
           tankster-light). Until then, or when runs-on is set, it changes
           nothing. This job runs your own commands: pass false if anything
-          in them needs Docker. A docker or docker-compose call, or a client
-          failing with "Cannot connect to the Docker daemon", "Could not
-          find a valid Docker environment" or a /var/run/docker.sock error,
-          fails the job, and the dispatcher re-runs the workflow on Cloud
-          Build and remembers it. Docker reached any other way is not caught.
+          in them needs Docker or uploads a lot. A docker or docker-compose
+          call, or a client failing with "Cannot connect to the Docker
+          daemon", "Could not find a valid Docker environment" or a
+          /var/run/docker.sock error, fails the job; so does sending more
+          than 64 MiB (artifacts, caches, pushes, uploads to an API), which
+          the light runner stops. Either way the dispatcher re-runs the
+          failed jobs on Cloud Build and keeps this workflow off the lane.
+          Docker reached any other way is not caught.
+          On the light runner the dependency cache is restored, never
+          saved; a build artifact (artifact-name) is still uploaded, and
+          counts towards the 64 MiB.
         type: boolean
         default: true
       install:
@@ -158,11 +164,51 @@ jobs:
           VERSION: ${{ inputs.node-version }}
           PM: ${{ inputs.package-manager }}
 
+      # On the light runner (its runner name starts crj-) nothing is saved:
+      # setup-node saves its cache after the job whenever caching is on, and
+      # a package store is easily more than the 64 MiB a light job may send.
+      # So its caching is off there, and the step after it restores the
+      # same cache read-only (a download, which costs nothing).
       - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ${{ steps.node.outputs.file }}
           node-version: ${{ steps.node.outputs.version }}
-          cache: ${{ steps.node.outputs.cache }}
+          cache: ${{ !startsWith(runner.name, 'crj-') && steps.node.outputs.cache || '' }}
+          package-manager-cache: ${{ !startsWith(runner.name, 'crj-') }}
+
+      # setup-node's own key and path (src/cache-restore.ts at v7.0.0):
+      # node-cache-<OS>-<Node's os.arch()>-<npm|pnpm>-<hash of the lockfile>,
+      # over `npm config get cache` or `pnpm store path`. If either differs
+      # here (another home directory, say), the restore just misses.
+      - name: Find the dependency cache (light runner)
+        id: light-cache
+        if: startsWith(runner.name, 'crj-') && steps.node.outputs.cache != ''
+        run: |
+          set -euo pipefail
+          if [ "${PM}" = "pnpm" ]; then
+            dir="$(pnpm store path --silent)"
+            lock=pnpm-lock.yaml
+          else
+            dir="$(npm config get cache)"
+            lock=""
+            for f in package-lock.json npm-shrinkwrap.json yarn.lock; do
+              if [ -f "$f" ]; then lock="$f"; break; fi
+            done
+          fi
+          {
+            echo "dir=${dir}"
+            echo "lock=${lock}"
+            echo "arch=$(node -p process.arch)"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          PM: ${{ inputs.package-manager }}
+
+      - name: Restore the dependency cache (light runner, read-only)
+        if: steps.light-cache.outputs.lock != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.light-cache.outputs.dir }}
+          key: node-cache-${{ runner.os }}-${{ steps.light-cache.outputs.arch }}-${{ inputs.package-manager }}-${{ hashFiles(steps.light-cache.outputs.lock) }}
 
       - name: Install dependencies
         run: |
@@ -221,6 +267,9 @@ jobs:
         if: inputs.build != ''
         run: ${{ inputs.build }}
 
+      # Kept on the light runner too: callers download this artifact in a
+      # later job. Over 64 MiB, the light runner stops the job and it is
+      # re-run on Cloud Build (see the light input).
       - name: Upload build artifact
         if: inputs.artifact-name != ''
         uses: actions/upload-artifact@v7.0.1

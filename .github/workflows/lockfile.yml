@@ -61,11 +61,15 @@ on:
           organisation opens the light lane (CI_LIGHT_RUNNER is
           tankster-light). Until then, or when runs-on is set, it changes
           nothing. This job runs your own commands: pass false if anything
-          in them needs Docker. A docker or docker-compose call, or a client
-          failing with "Cannot connect to the Docker daemon", "Could not
-          find a valid Docker environment" or a /var/run/docker.sock error,
-          fails the job, and the dispatcher re-runs the workflow on Cloud
-          Build and remembers it. Docker reached any other way is not caught.
+          in them needs Docker or uploads a lot. A docker or docker-compose
+          call, or a client failing with "Cannot connect to the Docker
+          daemon", "Could not find a valid Docker environment" or a
+          /var/run/docker.sock error, fails the job; so does sending more
+          than 64 MiB (artifacts, caches, pushes, uploads to an API), which
+          the light runner stops. Either way the dispatcher re-runs the
+          failed jobs on Cloud Build and keeps this workflow off the lane.
+          Docker reached any other way is not caught.
+          On the light runner setup-node's package cache is not used.
         type: boolean
         default: true
       verify:
@@ -119,10 +123,15 @@ jobs:
           VERSION_FILE: ${{ inputs.node-version-file }}
           VERSION: ${{ inputs.node-version }}
 
+      # setup-node caches npm on its own when package.json names npm as the
+      # package manager, and saves that cache after the job. On the light
+      # runner (runner name crj-...) a save could pass the 64 MiB a light job
+      # may send, so the cache is off there.
       - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ${{ steps.node.outputs.file }}
           node-version: ${{ steps.node.outputs.version }}
+          package-manager-cache: ${{ !startsWith(runner.name, 'crj-') }}
 
       - name: Record package.json checksum
         id: before
