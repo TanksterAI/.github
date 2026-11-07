@@ -60,10 +60,12 @@ on:
           Run on the Cloud Run light runner, which has no Docker, once the
           organisation opens the light lane (CI_LIGHT_RUNNER is
           tankster-light). Until then, or when runs-on is set, it changes
-          nothing. This job runs your own commands, so pass false if they
-          need Docker (testcontainers, docker compose, ...). Left true, the
-          first Docker call fails with TANKSTER_LIGHT_NO_DOCKER and the
-          dispatcher re-runs the workflow on Cloud Build and remembers it.
+          nothing. This job runs your own commands: pass false if anything
+          in them needs Docker. A docker or docker-compose call, or a client
+          failing with "Cannot connect to the Docker daemon", "Could not
+          find a valid Docker environment" or a /var/run/docker.sock error,
+          fails the job, and the dispatcher re-runs the workflow on Cloud
+          Build and remembers it. Docker reached any other way is not caught.
         type: boolean
         default: true
       verify:
