@@ -106,7 +106,7 @@ jobs:
       - name: Merge into the flows file
         id: merge
         if: steps.collect.outputs.files != ''
-        uses: TanksterAI/.github/.github/actions/runtime-gate@7e22b13255bfa7fadfdec580fc41a359985b0b61
+        uses: TanksterAI/.github/.github/actions/runtime-gate@087cbb6d99cfdbd2f0a78c47de08adeaea92dbb2
         with:
           mode: merge-flows
           flows-new: ${{ steps.collect.outputs.files }}

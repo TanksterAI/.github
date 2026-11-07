@@ -519,7 +519,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: TanksterAI/.github/.github/actions/runtime-gate@7e22b13255bfa7fadfdec580fc41a359985b0b61
+        uses: TanksterAI/.github/.github/actions/runtime-gate@087cbb6d99cfdbd2f0a78c47de08adeaea92dbb2
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -591,7 +591,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: TanksterAI/.github/.github/actions/runtime-gate@7e22b13255bfa7fadfdec580fc41a359985b0b61
+        uses: TanksterAI/.github/.github/actions/runtime-gate@087cbb6d99cfdbd2f0a78c47de08adeaea92dbb2
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -645,7 +645,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: TanksterAI/.github/.github/actions/runtime-gate@7e22b13255bfa7fadfdec580fc41a359985b0b61
+        uses: TanksterAI/.github/.github/actions/runtime-gate@087cbb6d99cfdbd2f0a78c47de08adeaea92dbb2
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
