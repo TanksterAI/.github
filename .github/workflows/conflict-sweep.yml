@@ -36,6 +36,24 @@ name: conflict-sweep
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: >-
+          Runner label. Empty (the default) follows the organisation's
+          CI_RUNNER variable, which moves CI onto the Cloud Build fallback
+          runner when the included Actions minutes run out, and means
+          ubuntu-latest when that variable is unset. A value here also
+          overrides light.
+        type: string
+        default: ""
+      light:
+        description: >-
+          Run on the Cloud Run light runner, which has no Docker, once the
+          organisation opens the light lane (CI_LIGHT_RUNNER is
+          tankster-light). Until then, or when runs-on is set, it changes
+          nothing. Nothing in this workflow needs Docker; false keeps it off
+          the lane anyway.
+        type: boolean
+        default: true
       base-branch:
         description: The branch whose movement can break open PRs.
         type: string
@@ -81,7 +99,13 @@ jobs:
   # env, and never printed.
   credentials:
     name: Check Anthropic credential
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     permissions: {}
     timeout-minutes: 2
     outputs:
@@ -107,7 +131,13 @@ jobs:
     name: Find newly conflicted PRs
     needs: credentials
     if: needs.credentials.outputs.available == 'true'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -213,7 +243,13 @@ jobs:
     name: "Resolve #${{ matrix.pr }}"
     needs: [credentials, detect]
     if: github.event_name != 'push' && needs.credentials.outputs.available == 'true' && (needs.detect.outputs.conflicted != '[]')
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       fail-fast: false
