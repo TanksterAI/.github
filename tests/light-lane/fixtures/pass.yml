@@ -25,20 +25,26 @@ jobs:
           echo docker
           cat Dockerfile
           export DOCKER_HOST=unused
+          make docker-up
+          npm run docker:up
           npm test
 
   plain-expression:
     runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
+      - name: Skip cleanly where there is no Docker
+        run: |
+          if ! command -v docker >/dev/null; then echo "no Docker here"; exit 0; fi
+          which docker || type docker || hash docker
       - run: python3 -m unittest
 
-  reversed-gate-and-spacing:
-    runs-on: "${{ ('tankster-light' == vars.CI_LIGHT_RUNNER && format( 'tankster-light-{0}-{1}' , github.run_id , github.run_attempt )) || 'ubuntu-latest' }}"
+  plain-expression-other-spacing:
+    runs-on: "${{(vars.CI_LIGHT_RUNNER=='tankster-light'&&format( 'tankster-light-{0}-{1}' , github.run_id , github.run_attempt ))||vars.CI_RUNNER||'ubuntu-latest'}}"
     steps:
       - run: echo ok
 
   first-party-action-unreadable:
-    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       # Not recorded, so it cannot be read; first-party and verified node.
       - uses: actions/setup-node@0000000000000000000000000000000000000000
@@ -52,9 +58,27 @@ jobs:
     steps:
       - uses: docker://alpine:3
       - uses: example/docker-action@3333333333333333333333333333333333333333
+      - uses: docker/setup-buildx-action@v4
       - run: docker compose up -d
 
   caller-turns-light-off:
-    uses: ./.github/workflows/node-ci.yml
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
     with:
       light: false
+      test: docker compose up -d && npm test
+
+  caller-pins-a-runner:
+    uses: TanksterAI/.github/.github/workflows/python-ci.yml@v1
+    with:
+      runs-on: ubuntu-latest
+      verify: docker compose run app pytest
+
+  caller-commands-without-docker:
+    uses: TanksterAI/.github/.github/workflows/node-ci.yml@v1
+    with:
+      install: npm ci
+      test: npm test -- --coverage
+      build: ${{ inputs.build }}
+
+  caller-of-a-workflow-without-command-inputs:
+    uses: TanksterAI/.github/.github/workflows/rust-ci.yml@v1

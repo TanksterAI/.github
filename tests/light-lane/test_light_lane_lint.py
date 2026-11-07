@@ -7,7 +7,7 @@ run by hand, this extracts it itself (with PyYAML or yq v4):
     python3 -m unittest discover -s tests/light-lane -v
 
 Standard library only, and offline: action metadata comes from recorded
-files under fixtures/actions, except in the test that starts a local HTTP
+files under fixtures/actions, except in the tests that start a local HTTP
 server to stand in for the GitHub API.
 """
 
@@ -29,6 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 FIXTURES = os.path.join(HERE, "fixtures")
 WORKFLOWS = os.path.join(ROOT, ".github", "workflows")
 STEP = "Light jobs stay Docker-free"
+TEMP_FILES = []
 
 # The contract's expression for a light-capable job in a shared reusable
 # workflow, and the one it replaced.
@@ -39,6 +40,11 @@ CONTRACT = (
 )
 OLD_REUSABLE = "${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}"
 OLD_PLAIN = "${{ vars.CI_RUNNER || 'ubuntu-latest' }}"
+OWN = (
+    "${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' "
+    "&& format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) "
+    "|| vars.CI_RUNNER || 'ubuntu-latest' }}"
+)
 
 # Every job these workflows run is Docker-free and on the light lane.
 LIGHT_WORKFLOWS = {
@@ -77,6 +83,7 @@ def _extract_script():
     handle = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8")
     with handle:
         handle.write(script)
+    TEMP_FILES.append(handle.name)
     return handle.name
 
 
@@ -88,6 +95,20 @@ def _load_module():
 
 
 lint = _load_module()
+
+
+def tearDownModule():
+    for name in TEMP_FILES:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+
+
+def _temp_yaml(text):
+    handle = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False, encoding="utf-8")
+    with handle:
+        handle.write(text)
+    TEMP_FILES.append(handle.name)
+    return handle.name
 
 
 class Recorded(lint.Resolver):
@@ -157,7 +178,7 @@ class Fixtures(unittest.TestCase):
 
     def test_pass_fixture_counts_its_light_jobs(self):
         light, _ = lint.check_file(os.path.join(FIXTURES, "pass.yml"), Recorded())
-        self.assertEqual(light, 4)
+        self.assertEqual(light, 5)
 
     def test_fail_fixture_reports_every_job_as_expected(self):
         path = os.path.join(FIXTURES, "fail.yml")
@@ -202,51 +223,59 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(code, 0, out.getvalue())
 
     def test_file_without_light_label_is_not_parsed(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as handle:
-            handle.write("this: [is: not, valid yaml\n")
-        self.assertEqual(lint.check_file(handle.name, Recorded()), (0, []))
+        path = _temp_yaml("this: [is: not, valid yaml\n")
+        self.assertEqual(lint.check_file(path, Recorded()), (0, []))
 
     def test_unparseable_light_file_fails_closed(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as handle:
-            handle.write("jobs: [tankster-light\n")
-        light, found = lint.check_file(handle.name, Recorded())
+        path = _temp_yaml("jobs: [tankster-light\n")
+        light, found = lint.check_file(path, Recorded())
         self.assertEqual(len(found), 1)
         self.assertIn("cannot read this file", found[0][2])
 
 
 class DockerCommands(unittest.TestCase):
+    # The independent review's probe cases, plus the guards of S4.
+    RUNS = {
+        "docker run x": "docker", "sudo docker ps": "docker", "  docker compose up": "docker",
+        "foo && docker build .": "docker", "! docker info": "docker",
+        "if ! docker info; then :; fi": "docker", "x=$(docker ps)": "docker",
+        '"docker" run x': "docker", "/usr/bin/docker run": "docker",
+        "DOCKER_BUILDKIT=1 docker build .": "docker", "eval docker ps": "docker",
+        "nice docker ps": "docker", "nice -n 5 docker ps": "docker", "exec 3>&1 docker": "docker",
+        "kind create cluster": "kind", "minikube start": "minikube", "docker\\\n run": "docker",
+        "echo hi | xargs -I{} docker rm {}": "docker", "xargs -I {} docker rm {}": "docker",
+        "time  docker ps": "docker", "sh -c 'docker ps'": "docker",
+        'bash -c "docker run x"': "docker", "earthly +build": "earthly", "act -j test": "act",
+        "dagger call test": "dagger", "buildctl build": "buildctl",
+        "docker-compose up": "docker-compose", "nerdctl run": "nerdctl", "podman run": "podman",
+        "buildah bud .": "buildah", "lima nerdctl run": "nerdctl", "pnpm exec docker ps": "docker",
+        "cd x; docker ps": "docker", "( docker ps )": "docker", "{ docker ps; }": "docker",
+        "command docker ps": "docker", "sudo -u root docker ps": "docker",
+        "env -i FOO=1 docker ps": "docker", "timeout 5 docker ps": "docker",
+        "docker ps 2>/dev/null": "docker", "`docker ps`": "docker",
+        'echo "$(docker version --format \'{{.Server.Version}}\')"': "docker",
+        'echo "id: `docker ps -q`"': "docker",
+    }
+    WORDS = [
+        "make docker-up", "bash scripts/up.sh", "npx testcontainers", "skopeo copy a b",
+        "echo 'use docker run to start'", "# docker run", "npm run docker:up",
+        "echo docker", "npm test  # then docker run, later", 'echo "docker run" # docker',
+        "cat Dockerfile", "dockerd --version", "export DOCKER_HOST=x", "my-docker-thing run",
+        "./scripts/docker_helper.sh", "command -v docker", "command -V docker", "which docker",
+        "type docker", "hash docker", "if ! command -v docker >/dev/null; then exit 0; fi",
+    ]
+
     def test_commands(self):
-        for script, tool in [
-            ("docker run x", "docker"),
-            ("  sudo -E docker build .", "docker"),
-            ("make && docker compose up", "docker"),
-            ("FOO=1 BAR=2 docker ps", "docker"),
-            ("/usr/local/bin/docker info", "docker"),
-            ("x=$(docker ps -q)", "docker"),
-            ("if docker info >/dev/null; then echo y; fi", "docker"),
-            ("timeout 5 docker ps", "docker"),
-            ("docker-compose up", "docker-compose"),
-            ("nerdctl ps", "nerdctl"),
-            ("a | xargs docker rm", "docker"),
-        ]:
+        for script, tool in self.RUNS.items():
             self.assertEqual([t for _, t in lint.docker_commands(script)], [tool], script)
 
     def test_words(self):
-        for script in [
-            "echo docker",
-            "# docker run x",
-            "npm test  # then docker run, later",
-            'echo "docker run" # docker',
-            "cat Dockerfile",
-            "dockerd --version",
-            "export DOCKER_HOST=x",
-            "my-docker-thing run",
-            "./scripts/docker_helper.sh",
-        ]:
+        for script in self.WORDS:
             self.assertEqual(lint.docker_commands(script), [], script)
 
     def test_line_numbers(self):
         self.assertEqual(lint.docker_commands("echo a\n\ndocker ps\n"), [(3, "docker")])
+        self.assertEqual(lint.docker_commands("echo a\ndocker \\\n  ps\n"), [(2, "docker")])
 
     def test_the_lint_does_not_flag_its_own_source(self):
         with open(_extract_script(), encoding="utf-8") as handle:
@@ -256,6 +285,26 @@ class DockerCommands(unittest.TestCase):
 class Labels(unittest.TestCase):
     def test_contract_expression_is_accepted(self):
         self.assertEqual(lint.label_problems(CONTRACT), [])
+        self.assertEqual(lint.label_problems(OWN), [])
+        self.assertEqual(lint.label_problems(" " + CONTRACT.replace(" ", "\n  ") + "\n"), [])
+
+    def test_anything_else_fails_and_shows_the_canonical_forms(self):
+        label = "format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)"
+        for value in [
+            "${{ (vars.CI_LIGHT_RUNNER == 'tankster-light') || " + label + " }}",
+            "${{ vars.CI_LIGHT_RUNNER != 'tankster-light' && " + label + " || 'x' }}",
+            "${{ " + label + " }}${{ vars.CI_LIGHT_RUNNER == 'tankster-light' }}",
+            "${{ vars.CI_LIGHT_RUNNER == 'tankster-light' && " + label + " || vars.CI_RUNNER }}",
+            "${{ vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_number, github.run_attempt) }}",
+            "${{ vars.CI_LIGHT_RUNNER == 'tankster-light' && format('Tankster-Light-{0}-{1}', github.run_id, github.run_attempt) }}",
+            "${{ vars.CI_LIGHT_RUNNER == 'tankster-light' && format('{0}-{1}-{2}', 'tankster-light', github.run_id, github.run_attempt) }}",
+            CONTRACT.replace("'tankster-light-{0}", "'tankster -light-{0}"),
+            [CONTRACT],
+        ]:
+            problems = lint.label_problems(value)
+            self.assertEqual(len(problems), 1, value)
+            self.assertIn(CONTRACT, problems[0])
+            self.assertIn(OWN, problems[0])
 
     def test_non_light_values_are_ignored(self):
         self.assertEqual(lint.label_problems(OLD_REUSABLE), [])
@@ -268,19 +317,37 @@ class HttpResolver(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         seen = cls.seen = []
+        hits = cls.hits = {}
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - http.server's name
                 seen.append((self.path, self.headers.get("Authorization"), self.headers.get("Accept")))
+                repo = self.path.split("/")[3] if self.path.count("/") > 3 else ""
+                hits[repo] = hits.get(repo, 0) + 1
+                headers = {}
                 if "/repos/o/node/contents/action.yml?ref=v1" in self.path:
                     body, code = b"runs:\n  using: node24\n", 200
                 elif "/repos/o/yaml/contents/action.yaml?ref=abc" in self.path:
                     body, code = b"runs:\n  using: docker\n  image: x\n", 200
-                elif "/repos/o/flaky/" in self.path:
-                    body, code = b"{}", 500
+                elif repo == "flaky-once":
+                    if hits[repo] == 1:
+                        body, code = b"{}", 502
+                    else:
+                        body, code = b"runs:\n  using: docker\n", 200
+                elif repo == "down":
+                    body, code = b"{}", 503
+                elif repo == "busy":
+                    body, code, headers = b"{}", 429, {"Retry-After": "0"}
+                elif repo == "limited":
+                    body, code = b'{"message": "API rate limit exceeded"}', 403
+                    headers = {"X-RateLimit-Remaining": "0"}
+                elif repo == "denied":
+                    body, code = b'{"message": "Resource not accessible by integration"}', 403
                 else:
                     body, code = b'{"message": "Not Found"}', 404
                 self.send_response(code)
+                for key, value in headers.items():
+                    self.send_header(key, value)
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -288,15 +355,18 @@ class HttpResolver(unittest.TestCase):
                 pass
 
         cls.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
         cls.api = "http://127.0.0.1:{}".format(cls.server.server_address[1])
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(5)
 
     def resolver(self):
-        return lint.Resolver(root=FIXTURES, api=self.api, token="t0ken")
+        return lint.Resolver(root=FIXTURES, api=self.api, token="t0ken", backoff=(0, 0))
 
     def test_reads_action_yml_with_token(self):
         data, reason = self.resolver().action("o/node@v1")
@@ -310,23 +380,66 @@ class HttpResolver(unittest.TestCase):
         self.assertEqual(lint.action_problems("o/yaml@abc", self.resolver()), ["o/yaml@abc is a Docker action (runs.using: docker)"])
 
     def test_not_found_fails_closed(self):
-        problems = lint.action_problems("o/missing@v1", self.resolver())
+        resolver = self.resolver()
+        problems = lint.action_problems("o/missing@v1", resolver)
         self.assertEqual(len(problems), 1)
         self.assertIn("could not read o/missing@v1", problems[0])
         self.assertIn("not found", problems[0])
+        self.assertEqual(resolver.warnings, [])
 
-    def test_server_error_fails_closed(self):
-        problems = lint.action_problems("o/flaky@v1", self.resolver())
-        self.assertIn("HTTP 500", problems[0])
+    def test_refusal_fails_closed(self):
+        problems = lint.action_problems("o/denied@v1", self.resolver())
+        self.assertIn("HTTP 403", problems[0])
+
+    def test_a_transient_error_is_retried(self):
+        resolver = self.resolver()
+        self.assertEqual(lint.action_problems("o/flaky-once@v1", resolver), ["o/flaky-once@v1 is a Docker action (runs.using: docker)"])
+        self.assertEqual(self.hits["flaky-once"], 2)
+
+    def test_transient_errors_warn_after_three_tries(self):
+        for repo, why in [("down", "HTTP 503"), ("busy", "HTTP 429"), ("limited", "rate limited")]:
+            resolver = self.resolver()
+            self.hits[repo] = 0
+            self.assertEqual(lint.action_problems("o/{}@v1".format(repo), resolver), [], repo)
+            self.assertEqual(len(resolver.warnings), 1, repo)
+            self.assertIn(why, resolver.warnings[0])
+            self.assertEqual(self.hits[repo], 3, repo)
 
     def test_first_party_fallback_only_when_unreadable(self):
         self.assertEqual(lint.action_problems("actions/checkout@deadbeef", self.resolver()), [])
         self.assertTrue(lint.action_problems("actions/github-script@deadbeef", self.resolver()))
 
-    def test_unreachable_api_fails_closed(self):
-        resolver = lint.Resolver(root=FIXTURES, api="http://127.0.0.1:9", token="")
-        problems = lint.action_problems("o/node@v1", resolver)
-        self.assertIn("could not read", problems[0])
+    def test_unreachable_api_warns(self):
+        resolver = lint.Resolver(root=FIXTURES, api="http://127.0.0.1:9", token="", backoff=(0, 0))
+        self.assertEqual(lint.action_problems("o/node@v1", resolver), [])
+        self.assertIn("transient", resolver.warnings[0])
+
+    def test_dockers_own_actions_need_no_lookup(self):
+        resolver = self.resolver()
+        before = len(self.seen)
+        self.assertIn("Docker's own actions", lint.action_problems("docker/build-push-action@v7", resolver)[0])
+        self.assertEqual(len(self.seen), before)
+
+    def test_main_prints_the_warnings(self):
+        out = io.StringIO()
+        old = lint.Resolver
+        api = self.api
+
+        class Down(lint.Resolver):
+            def __init__(self):
+                super().__init__(root=FIXTURES, api=api, token="", backoff=(0, 0))
+
+        path = _temp_yaml(
+            "jobs:\n  j:\n    runs-on: " + OWN + "\n    steps:\n      - uses: o/down@v1\n"
+        )
+        lint.Resolver = Down
+        try:
+            with contextlib.redirect_stdout(out):
+                code = lint.main([path])
+        finally:
+            lint.Resolver = old
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("::warning title=Light lane::could not read o/down@v1", out.getvalue())
 
 
 class YqLoader(unittest.TestCase):
@@ -335,7 +448,8 @@ class YqLoader(unittest.TestCase):
     def test_yq_path_matches_pyyaml(self):
         if lint._yq() is None:
             self.skipTest("yq v4 (mikefarah) not installed")
-        text = open(os.path.join(FIXTURES, "fail.yml"), encoding="utf-8").read()
+        with open(os.path.join(FIXTURES, "fail.yml"), encoding="utf-8") as handle:
+            text = handle.read()
         saved = sys.modules.get("yaml")
         sys.modules["yaml"] = None  # makes `import yaml` raise ImportError
         try:
@@ -456,8 +570,7 @@ class ShippedWorkflows(unittest.TestCase):
     def test_other_workflows_are_not_light(self):
         for name in NOT_LIGHT:
             path = os.path.join(WORKFLOWS, name)
-            if not os.path.exists(path):
-                continue
+            self.assertTrue(os.path.isfile(path), "{} is missing: renamed? Update NOT_LIGHT".format(name))
             with open(path, encoding="utf-8") as handle:
                 self.assertNotIn("tankster-light", handle.read(), name)
 
