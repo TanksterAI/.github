@@ -326,13 +326,29 @@ function baselineCoverage() {
   try { return JSON.parse(fs.readFileSync(f, 'utf8')).coverage || null; } catch { return null; }
 }
 
-function diff(name) {
+// pngjs's synchronous reader (PNG.sync.read) subclasses zlib.Inflate the
+// pre-ES2015 way, with zlib.Inflate.call(this), which throws "Class
+// constructor Inflate cannot be invoked without 'new'" from Node 27: zlib's
+// streams became real classes there (nodejs/node#64849). Its streaming parser
+// only calls zlib.createInflate, which works on every Node, so screenshots are
+// decoded through that instead.
+function readPng(file) {
+  return new Promise((resolve, reject) => {
+    const png = new PNG();
+    // The first error rejects; a later one must not become an unhandled
+    // 'error' event that kills the crawl.
+    png.on('error', () => {});
+    png.parse(fs.readFileSync(file), (err, img) => (err ? reject(err) : resolve(img)));
+  });
+}
+
+async function diff(name) {
   if (!BASE_SCREENS) return null;
   const before = path.join(BASE_SCREENS, `${name}.png`);
   const after = path.join(SCREENS, `${name}.png`);
   if (!fs.existsSync(before) || !fs.existsSync(after)) return null;
-  const a = PNG.sync.read(fs.readFileSync(before));
-  const b = PNG.sync.read(fs.readFileSync(after));
+  const a = await readPng(before);
+  const b = await readPng(after);
   const width = Math.min(a.width, b.width);
   const height = Math.min(a.height, b.height);
   const crop = (img) => {
@@ -757,8 +773,15 @@ async function main() {
   }
   if (BASE_SCREENS) {
     for (const f of fs.readdirSync(SCREENS)) {
-      const d = diff(f.replace(/\.png$/, ''));
-      if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
+      const name = f.replace(/\.png$/, '');
+      // Visual changes are advisory. A screenshot that cannot be compared is
+      // a warning, and must never stop the crawl from writing its report.
+      try {
+        const d = await diff(name);
+        if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
+      } catch (err) {
+        collector.add('visual-diff-failed', `could not compare ${f} with the baseline: ${String(err.message || err).split('\n')[0]}`, { blocking: false, page: urlByShot.get(name) || name });
+      }
     }
   }
 
@@ -901,6 +924,7 @@ export function renderMarkdown(r) {
     lines.push('');
   }
   if (r.baseline === 'compared') {
+    const unreadable = r.findings.filter((f) => f.kind === 'visual-diff-failed').length;
     if (r.visual.length) {
       lines.push(`**Visual changes vs the default branch** (advisory, ${r.visual.length}):`);
       for (const v of r.visual.slice(0, 20)) {
@@ -908,7 +932,7 @@ export function renderMarkdown(r) {
       }
       lines.push('');
     } else {
-      lines.push('No visual changes against the last default-branch run.');
+      lines.push(unreadable ? `No visual changes found, but ${unreadable} screenshot(s) could not be compared with the baseline (see the warnings above).` : 'No visual changes against the last default-branch run.');
       lines.push('');
     }
   }

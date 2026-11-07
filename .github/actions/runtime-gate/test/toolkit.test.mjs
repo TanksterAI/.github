@@ -65,6 +65,21 @@ test('healthy site passes', () => {
   assert.ok(report.findings.some((f) => !f.blocking && /404 POST .*\/api\/login .*after submitting a form/.test(f.message)), 'a 4xx answering a dummy sign-in is a warning, not a failure');
 });
 
+test('a baseline screenshot that cannot be decoded is a warning, not a crash', () => {
+  // The visual diff is advisory: an unreadable baseline (or a PNG decoder
+  // that breaks on a new Node) must not stop the crawl or lose its report.
+  const baseline = fs.mkdtempSync(path.join(os.tmpdir(), 'rg-baseline-'));
+  fs.mkdirSync(path.join(baseline, 'screens'));
+  fs.writeFileSync(path.join(baseline, 'screens', 'desktop-root.png'), 'not a png');
+  const r = run('crawl.mjs', { RG_URL: GOOD, RG_BASELINE_DIR: baseline, RG_MAX_PAGES: '2', RG_INTERACT: 'false', RG_FORMS: 'false' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const report = JSON.parse(fs.readFileSync(path.join(r.out, 'crawl.json'), 'utf8'));
+  assert.equal(report.baseline, 'compared');
+  const f = report.findings.find((x) => x.kind === 'visual-diff-failed');
+  assert.ok(f && !f.blocking && /desktop-root\.png/.test(f.message), JSON.stringify(report.findings, null, 1));
+  assert.match(fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8'), /could not be compared with the baseline/);
+});
+
 test('broken site fails with every kind of breakage', () => {
   const r = run('crawl.mjs', { RG_URL: BROKEN, RG_ROUTES: '/items/3\n/signin', RG_PER_PATTERN: '5' });
   assert.equal(r.status, 1, r.stdout + r.stderr);
