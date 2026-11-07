@@ -42,8 +42,10 @@ on:
           Run on the Cloud Run light runner, which has no Docker, once the
           organisation opens the light lane (CI_LIGHT_RUNNER is
           tankster-light). Until then, or when runs-on is set, it changes
-          nothing. Nothing in this workflow needs Docker; false keeps it off
-          the lane anyway.
+          nothing. Nothing in this workflow needs Docker, and it sends far
+          less than the 64 MiB the light runner allows a job: it does not
+          save the actionlint cache there. false keeps it off the lane
+          anyway.
         type: boolean
         default: true
       fallback-version:
@@ -160,7 +162,9 @@ jobs:
           shopt -s nullglob
           files=(.github/workflows/*.yml .github/workflows/*.yaml)
           pattern='tankster-light|(TanksterAI/\.github/|\./)\.github/workflows/(node-ci|python-ci|lockfile)\.ya?ml'
-          if [ "${#files[@]}" -gt 0 ] && grep -lqE -- "${pattern}" "${files[@]}"; then
+          # -i: GitHub matches runner labels and the owner in uses: without
+          # regard to case.
+          if [ "${#files[@]}" -gt 0 ] && grep -lqiE -- "${pattern}" "${files[@]}"; then
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
@@ -194,14 +198,19 @@ jobs:
           #     expressions in CANONICAL: the run-bound label, gated by the
           #     organisation's switch. Anything else that mentions tankster-light
           #     fails, so no job can ask with a fixed label or ignore the switch.
-          #   - the job has services or a container, a step uses docker://, a run step
-          #     calls a container tool (TOOLS) as a command, a step uses a docker/*
-          #     action or one whose action.yml says runs.using: docker, or it gives
-          #     claude-code-action an mcp__github__ tool (which starts a container).
-          #     Composite actions are followed into their steps.
+          #   - the job has services or a container, a step uses docker://, a shell
+          #     run step (bash, sh or the default shell; not python, pwsh and the
+          #     like) calls a container tool (TOOLS) as a command, a step uses a
+          #     docker/* action or one whose action.yml says runs.using: docker, or it
+          #     gives claude-code-action an mcp__github__ tool (which starts a
+          #     container). Composite actions are followed into their steps.
+          #   - it uses the shared-workflow form in a workflow without a boolean
+          #     `light` input: a string 'false' is truthy, so the job would take the
+          #     lane anyway.
           # A job that calls one of the shared workflows that run the caller's own
           # commands (COMMAND_INPUTS) without light: false is checked too: those
-          # commands get the same run-step rules.
+          # commands get the same run-step rules. Owners and labels are matched
+          # without regard to case, as GitHub matches them.
           #
           # Action metadata is read through the GitHub API at the pinned ref, with the
           # job's token. A 404, a refusal or metadata that does not parse fails the job
@@ -209,13 +218,18 @@ jobs:
           # transient error (5xx, 429, a rate limit, the network) is retried with
           # backoff and then only warned about: the runner's Docker shim and the
           # dispatcher's re-run on Cloud Build are the backstop for that one action.
+          # After one action has ended that way, the rest are tried once each, so a
+          # long outage costs seconds, not minutes.
           #
           # Limits, so nobody reads more into a green run than it says: run scripts
           # are matched as text, so Docker reached through a script file, a package
           # script (npm run ...), a variable or a library (testcontainers, say) is not
-          # seen, and nor is a runs-on that takes its label from a variable. The
-          # dispatcher's re-run on TANKSTER_LIGHT_NO_DOCKER and the socket errors is
-          # the fallback for what this cannot see.
+          # seen, and nor is a runs-on that takes its label from a variable. Heredoc
+          # bodies are skipped unless a shell reads them. The dispatcher's re-run on
+          # TANKSTER_LIGHT_NO_DOCKER and the socket errors is the fallback for what
+          # this cannot see. Nor does it check how much a job uploads: the runner
+          # stops a job that sends more than its egress limit, and the dispatcher
+          # re-runs it on Cloud Build.
           import glob
           import json
           import os
@@ -272,9 +286,15 @@ jobs:
               "python-ci.yml": ("install", "extra-install", "verify", "sibling-install"),
               "lockfile.yml": ("verify",),
           }
+          # GitHub resolves the owner and repository of `uses:` without regard to case.
           SHARED_CALL_RE = re.compile(
-              r"^(?:TanksterAI/\.github/|\./)\.github/workflows/(?P<file>[\w.-]+\.ya?ml)(?:@\S+)?$"
+              r"^(?:TanksterAI/\.github/|\./)\.github/workflows/(?P<file>[\w.-]+\.ya?ml)(?:@\S+)?$",
+              re.IGNORECASE,
           )
+          # An expression (OPEN ... CLOSE) inside a command input: its value is not
+          # known here, so it is linted as one plain word and the rest of the command
+          # as it stands.
+          EXPRESSION_RE = re.compile(re.escape(OPEN) + r".*?" + re.escape(CLOSE), re.DOTALL)
           # First-party actions read and found to be node24 at the refs this estate
           # pins (Nov 2026). Used only when their action.yml cannot be fetched.
           VERIFIED_NODE = {
@@ -347,6 +367,12 @@ jobs:
                       yield from strings(item)
 
 
+          def mentions_light(value):
+              """Whether any string in a YAML value names the light lane. Runner labels
+              match without regard to case, so this does too."""
+              return any(LIGHT in s.lower() for s in strings(value))
+
+
           def squeeze(text):
               """Drop whitespace outside single-quoted literals."""
               out, quoted = [], False
@@ -363,7 +389,7 @@ jobs:
 
           def label_problems(runs_on):
               """Why a runs-on value that mentions the light lane is not canonical."""
-              if not any(LIGHT in s for s in strings(runs_on)):
+              if not mentions_light(runs_on):
                   return []
               if isinstance(runs_on, str) and squeeze(runs_on.strip()) in CANONICAL_SQUEEZED:
                   return []
@@ -375,16 +401,73 @@ jobs:
               ]
 
 
+          HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(?:'([^']*)'|\"([^\"]*)\"|\\?([^\s;&|()<>'\"]+))")
+
+
+          def _heredocs(line):
+              """[(delimiter, strip tabs, a shell reads the body)] for each heredoc a
+              line opens. Only `<<` outside quotes and comments counts; `<<<` is a
+              here-string, which has no body."""
+              found, i, quote = [], 0, None
+              while i < len(line):
+                  ch = line[i]
+                  if quote:
+                      if ch == "\\" and quote == '"':
+                          i += 2
+                          continue
+                      if ch == quote:
+                          quote = None
+                      i += 1
+                      continue
+                  if ch == "\\":
+                      i += 2
+                      continue
+                  if ch in "'\"":
+                      quote = ch
+                  elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+                      break
+                  elif line.startswith("<<<", i):
+                      i += 3
+                      continue
+                  elif line.startswith("<<", i):
+                      match = HEREDOC_RE.match(line, i)
+                      if match:
+                          delimiter = next(g for g in match.groups()[1:] if g is not None)
+                          found.append([delimiter, bool(match.group(1))])
+                          i = match.end()
+                          continue
+                  i += 1
+              # `bash <<EOF` or `cat <<EOF | sh` runs the body as a script, so those
+              # bodies are linted; `cat > notes.md <<'EOF'` only writes text.
+              shell = any(word.rsplit("/", 1)[-1] in SHELLS for word in line.split())
+              return [(d, strip, shell) for d, strip in found]
+
+
           def _join_continuations(script):
+              """(first line number, logical line) for each line of a shell script,
+              with backslash continuations joined and heredoc bodies left out unless a
+              shell reads them."""
               lines, buf, first = [], "", None
+              body, pending = None, []
               for number, line in enumerate(script.splitlines(), 1):
+                  if body is not None:
+                      delimiter, strip, shell = body
+                      if (line.lstrip("\t") if strip else line) == delimiter:
+                          body = pending.pop(0) if pending else None
+                      elif shell:
+                          lines.append((number, line))
+                      continue
                   if first is None:
                       first = number
                   if line.endswith("\\"):
                       buf += line[:-1] + " "
                       continue
-                  lines.append((first, buf + line))
+                  logical = buf + line
+                  lines.append((first, logical))
                   buf, first = "", None
+                  docs = _heredocs(logical)
+                  if docs:
+                      body, pending = docs[0], docs[1:]
               if buf:
                   lines.append((first, buf))
               return lines
@@ -527,6 +610,9 @@ jobs:
                   self.backoff = backoff
                   self.cache = {}
                   self.warnings = []
+                  # Set once a lookup has run out of retries: the API is down or
+                  # throttling us, so later lookups are tried once and not waited for.
+                  self.degraded = False
 
               def _get(self, owner, repo, path, ref):
                   """(text, None), (None, "not found"), (None, reason) or (None, TRANSIENT + reason)."""
@@ -542,7 +628,8 @@ jobs:
                   if self.token:
                       headers["Authorization"] = "Bearer " + self.token
                   last = "no response"
-                  for attempt in range(len(self.backoff) + 1):
+                  retries = 0 if self.degraded else len(self.backoff)
+                  for attempt in range(retries + 1):
                       wait = None
                       try:
                           request = urllib.request.Request(url, headers=headers)
@@ -565,8 +652,9 @@ jobs:
                               wait = min(int(retry_after), 10)
                       except (urllib.error.URLError, OSError) as err:
                           last = str(getattr(err, "reason", err))
-                      if attempt < len(self.backoff):
+                      if attempt < retries:
                           time.sleep(self.backoff[attempt] if wait is None else wait)
+                  self.degraded = True
                   return None, TRANSIENT + ": " + last
 
               def action(self, uses):
@@ -609,6 +697,27 @@ jobs:
                   return data, None
 
 
+          def is_shell(shell):
+              """Whether a step's `shell` (None: the default) runs its script with a
+              POSIX shell. bash, sh and templates such as `bash -e {0}` do; python,
+              pwsh, cmd and the like do not, and their scripts are not shell."""
+              if shell is None or not str(shell).strip():
+                  return True
+              return str(shell).split()[0].rsplit("/", 1)[-1] in SHELLS
+
+
+          def _shell_of(step, defaults=()):
+              """The step's shell, else the first of the job's and the workflow's
+              `defaults.run.shell` that is set."""
+              if step.get("shell") is not None:
+                  return step.get("shell")
+              for level in defaults:
+                  run = (level or {}).get("run") if isinstance(level, dict) else None
+                  if isinstance(run, dict) and run.get("shell") is not None:
+                      return run.get("shell")
+              return None
+
+
           def action_problems(uses, resolver, depth=0, seen=None):
               """Why a step's `uses` cannot run without Docker."""
               seen = set() if seen is None else seen
@@ -649,7 +758,7 @@ jobs:
                   for step in runs.get("steps") or []:
                       if not isinstance(step, dict):
                           continue
-                      if isinstance(step.get("run"), str):
+                      if isinstance(step.get("run"), str) and is_shell(step.get("shell")):
                           for line, tool in docker_commands(step["run"]):
                               problems.append("{} runs `{}` (its step {!r}, line {})".format(
                                   uses, tool, step.get("name", "?"), line))
@@ -675,9 +784,9 @@ jobs:
               problems = []
               for name in COMMAND_INPUTS[match.group("file")]:
                   value = with_.get(name)
-                  if not isinstance(value, str) or OPEN in value:
+                  if not isinstance(value, str):
                       continue
-                  for line, tool in docker_commands(value):
+                  for line, tool in docker_commands(EXPRESSION_RE.sub("expression", value)):
                       problems.append(
                           "calls {} with light on (the default), and its {} input runs `{}` "
                           "(line {}); pass light: false".format(match.group("file"), name, tool, line)
@@ -685,16 +794,30 @@ jobs:
               return True, problems
 
 
-          def job_problems(job, resolver):
-              """Every reason one job cannot be a light job, or [] if it is not light."""
+          def boolean_light_input(data):
+              """Whether a workflow declares on.workflow_call.inputs.light as boolean.
+              PyYAML reads the key `on` as True, so both spellings are looked at."""
+              if not isinstance(data, dict):
+                  return False
+              on = data.get("on", data.get(True))
+              call = on.get("workflow_call") if isinstance(on, dict) else None
+              inputs = call.get("inputs") if isinstance(call, dict) else None
+              light = inputs.get("light") if isinstance(inputs, dict) else None
+              return isinstance(light, dict) and str(light.get("type", "")).strip() == "boolean"
+
+
+          def job_problems(job, resolver, defaults=None, boolean_light=True):
+              """Every reason one job cannot be a light job, or [] if it is not light.
+              `defaults` is the workflow's `defaults`; `boolean_light` whether the
+              workflow has a boolean light input."""
               problems = []
               runs_on = job.get("runs-on")
-              light = any(LIGHT in s for s in strings(runs_on))
+              light = mentions_light(runs_on)
               strategy = job.get("strategy") if isinstance(job.get("strategy"), dict) else {}
-              if any(LIGHT in s for s in strings(strategy.get("matrix"))):
+              if mentions_light(strategy.get("matrix")):
                   problems.append("a light label in a strategy matrix cannot be run-bound; put it in runs-on")
               with_ = job.get("with") if isinstance(job.get("with"), dict) else {}
-              if "uses" in job and any(LIGHT in s for s in strings(with_.get("runs-on"))):
+              if "uses" in job and mentions_light(with_.get("runs-on")):
                   problems.append(
                       "passes a light label to a reusable workflow through runs-on; only that "
                       "workflow knows whether its jobs need Docker, so use its light input"
@@ -703,15 +826,28 @@ jobs:
               if not light:
                   return problems
               problems.extend(label_problems(runs_on))
+              if (
+                  not boolean_light
+                  and isinstance(runs_on, str)
+                  and squeeze(runs_on.strip()) == squeeze(CANONICAL[0])
+              ):
+                  problems.append(
+                      "uses the shared-workflow form, which needs a `light` input of type boolean "
+                      "in on.workflow_call.inputs: from any other input, a 'false' is a non-empty "
+                      "string, which is true, so the job would take the light lane anyway"
+                  )
               if "services" in job:
                   problems.append("has services, which need Docker")
               if "container" in job:
                   problems.append("runs in a container, which needs Docker")
+              levels = (job.get("defaults"), defaults)
               for index, step in enumerate(job.get("steps") or [], 1):
                   if not isinstance(step, dict):
                       continue
                   name = step.get("name") or step.get("uses") or "step {}".format(index)
-                  if isinstance(step.get("run"), str):
+                  # Only shell scripts are read as shell: a python or pwsh step's
+                  # `docker = shutil.which("docker")` runs nothing.
+                  if isinstance(step.get("run"), str) and is_shell(_shell_of(step, levels)):
                       for line, tool in docker_commands(step["run"]):
                           problems.append("step {!r} runs `{}` (line {} of its script)".format(name, tool, line))
                   uses = step.get("uses")
@@ -740,8 +876,9 @@ jobs:
 
           def needs_check(text):
               """Whether a file can hold anything this lint checks."""
-              return LIGHT in text or any(
-                  "/workflows/" + name in text for name in COMMAND_INPUTS
+              lower = text.lower()
+              return LIGHT in lower or any(
+                  "/workflows/" + name in lower for name in COMMAND_INPUTS
               )
 
 
@@ -760,12 +897,14 @@ jobs:
                   return 0, []
               found = []
               light = 0
+              defaults = data.get("defaults")
+              boolean_light = boolean_light_input(data)
               for job_id, job in jobs.items():
                   if not isinstance(job, dict):
                       continue
-                  if any(LIGHT in s for s in strings(job.get("runs-on"))) or caller_problems(job)[0]:
+                  if mentions_light(job.get("runs-on")) or caller_problems(job)[0]:
                       light += 1
-                  for message in job_problems(job, resolver):
+                  for message in job_problems(job, resolver, defaults, boolean_light):
                       found.append((job_line(text, job_id), job_id, message))
               return light, found
 
@@ -812,9 +951,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FALLBACK: ${{ inputs.fallback-version }}
 
-      - name: Cache actionlint
+      # Restore and save are separate steps so the light runner (runner name
+      # crj-...), which must not upload more than it has to, restores the
+      # binary but never saves it; other runners save it as before.
+      - name: Restore actionlint
         id: cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.cache/actionlint
           key: ${{ runner.os }}-${{ runner.arch }}-actionlint-${{ steps.resolve.outputs.version }}
@@ -842,11 +984,24 @@ jobs:
           TAG: ${{ steps.resolve.outputs.tag }}
           VERSION: ${{ steps.resolve.outputs.version }}
 
+      - name: Save actionlint
+        if: steps.cache.outputs.cache-hit != 'true' && !startsWith(runner.name, 'crj-')
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.cache/actionlint
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
       - name: Run actionlint
         run: |
           set -euo pipefail
           bin="${GITHUB_WORKSPACE}/.cache/actionlint/actionlint"
           "$bin" -version
+          # actionlint skips shellcheck without a word when it is not on PATH
+          # (the light runner and the Cloud Build image have none), so a
+          # green run would look as if the run: blocks had been checked.
+          if [ "${SHELLCHECK}" = "true" ] && ! command -v shellcheck >/dev/null; then
+            echo "::warning title=shellcheck not installed::shellcheck is not on this runner (${RUNNER_NAME:-unknown}), so actionlint did not check the run: blocks with it. They are checked on runners that have it, such as GitHub-hosted ones."
+          fi
           if [ "${SHELLCHECK}" = "true" ]; then
             "$bin" -color
           else
