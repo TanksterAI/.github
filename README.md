@@ -141,7 +141,7 @@ default `true` except where the table says otherwise:
 | Workflow | Light lane | Why |
 |---|---|---|
 | `node-ci.yml`, `python-ci.yml`, `lockfile.yml` | yes | Docker-free, but they run your commands (`test`, `verify`, ...): see opting out, toolchains and egress |
-| `rust-ci.yml` | off by default (`light: true` opts in) | every Rust build needs a C linker, and the light image has no C toolchain and no rustup: the job would fail with `rustup` or `cc` not found, which is not re-routed. Turn it on only once the image has them |
+| `rust-ci.yml` | off by default (`light: true` opts in) | every Rust build needs a C linker, and the light image has no C toolchain and no rustup: the job would fail with `rustup: command not found`. The dispatcher learns that and re-runs it on Cloud Build (see toolchains), but only after one failed light execution for each caller's workflow, which every Rust caller would waste. Turn it on only once the image has them |
 | `workflows-lint.yml`, `runtime-gate-flows.yml`, `auto-merge-gate.yml` | yes | nothing in them needs Docker, and they send little |
 | `claude-address-feedback.yml`, `conflict-sweep.yml` | off by default (`light: true` opts in) | no Docker, but every model request resends the conversation, so a long session can pass the egress limit, and the re-run on Cloud Build would repeat the session: its model usage, and any pushes or comments the first attempt made. Turn it on only once their egress has been measured |
 | `security.yml` | no | `osv-scanner-action` is a Docker action |
@@ -165,13 +165,28 @@ from then on. That works when the failed job's log shows one of:
 Anything else that needs Docker must pass `light: false`: a tool that gives up
 with some other message fails the job and is not re-run.
 
-**Toolchains.** The light image has no C/C++ toolchain: no `cc`, `c++` or
-`make`, and no `rustup` or `cargo`. A caller whose dependencies compile native
-code must pass `light: false`: a Node package with a native addon built by
-node-gyp, or a Python package that builds from source because no wheel fits
-the runner. The dispatcher also learns the common missing-toolchain failures
-and re-runs them on Cloud Build, but a build that fails some other way is not
-re-run. rust-ci is off the lane by default for this reason.
+**Toolchains.** The light image has no compilers or linkers: no `cc`, `gcc`,
+`g++`, `make` or `ld`, no `rustup` or `cargo`, and no `python3` (which node-gyp
+needs). A caller whose dependencies compile native code must pass
+`light: false`: a Node package with a native addon built by node-gyp, or a
+Python package that builds from source because no wheel fits the runner. If a
+caller does not, the dispatcher records the workflow in `CI_LIGHT_DOCKER` with
+the reason `toolchain` and re-runs the run's failed jobs once on Cloud Build,
+when the failed job's log shows one of these (exact and case-sensitive):
+
+- `rustup: command not found`, `cargo: command not found`,
+  `` linker `cc` not found ``;
+- `gyp ERR!`;
+- `make: command not found`, `gcc: command not found`,
+  `g++: command not found`, `cc: command not found`;
+- `error: command 'gcc' failed`, `unable to execute 'gcc'`.
+
+Anything else that needs a compiler must pass `light: false`: a build that
+fails with some other message fails the job and is not re-run. meson's
+`Unknown compiler(s)` and maturin's or setuptools-rust's
+`can't find Rust compiler`, for example, are not learned. rust-ci is off the
+lane by default because every Rust caller would otherwise lose one failed
+light execution before it is learned.
 
 **Egress.** Cloud Run's internet egress is free for 1 GiB a month, then billed,
 so the runner image meters what each job sends. A light job that sends more
