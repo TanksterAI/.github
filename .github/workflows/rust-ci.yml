@@ -32,9 +32,12 @@ on:
         description: >-
           Run on the Cloud Run light runner, which has no Docker, once the
           organisation opens the light lane (CI_LIGHT_RUNNER is
-          tankster-light). Until then, or when runs-on is set, it changes
-          nothing. This job runs your own commands: pass false if anything
-          in them needs Docker or uploads a lot. A docker or docker-compose
+          tankster-light) and runs-on is empty. Off by default: the light
+          image has no C toolchain and no rustup, and every Rust build needs
+          a C linker (cc), so this job would fail there with rustup or cc
+          not found, which the dispatcher does not re-route to Cloud Build.
+          Set true only once the light image has them. When on, pass false
+          if anything in your commands needs Docker or uploads a lot. A docker or docker-compose
           call, or a client failing with "Cannot connect to the Docker
           daemon", "Could not find a valid Docker environment" or a
           /var/run/docker.sock error, fails the job; so does sending more
@@ -44,7 +47,7 @@ on:
           Docker reached any other way is not caught.
           On the light runner rust-cache restores, never saves.
         type: boolean
-        default: true
+        default: false
       working-directory:
         type: string
         default: "."
