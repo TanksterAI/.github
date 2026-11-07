@@ -58,9 +58,13 @@ LIGHT_WORKFLOWS = {
     "rust-ci.yml": ["verify"],
     "workflows-lint.yml": ["actionlint"],
 }
-# Agentic sessions, off the lane unless a caller turns it on: a re-run after
-# the light runner's egress stop would repeat the session.
-LIGHT_OFF_BY_DEFAULT = {"claude-address-feedback.yml", "conflict-sweep.yml"}
+# Off the lane unless a caller turns it on: the agentic sessions, because a
+# re-run after the light runner's egress stop would repeat the session; and
+# rust-ci, because the light image has no C linker or rustup.
+LIGHT_OFF_BY_DEFAULT = {"claude-address-feedback.yml", "conflict-sweep.yml", "rust-ci.yml"}
+# They run the caller's installs, which may compile native code: their light
+# input says the light image has no compiler.
+NO_TOOLCHAIN_NOTE = {"node-ci.yml", "python-ci.yml", "lockfile.yml"}
 # These keep their runner expression: Docker (or, for lighthouse-ci, Chrome
 # and its system libraries, not yet tried on Cloud Run).
 NOT_LIGHT = ["lighthouse-ci.yml", "runtime-gate.yml", "security.yml", "claude-review.yml"]
@@ -640,6 +644,10 @@ class ShippedWorkflows(unittest.TestCase):
             default = name not in LIGHT_OFF_BY_DEFAULT
             self.assertEqual(inputs["light"], {**inputs["light"], "type": "boolean", "default": default}, name)
             self.assertIn("64 MiB", inputs["light"]["description"], name)
+            if not default:
+                self.assertIn("Off by default", inputs["light"]["description"], name)
+            if name in NO_TOOLCHAIN_NOTE:
+                self.assertIn("no C/C++ toolchain", inputs["light"]["description"], name)
             self.assertEqual(inputs["runs-on"]["default"], "", name)
             for job in jobs:
                 self.assertEqual(data["jobs"][job]["runs-on"], CONTRACT, "{}: {}".format(name, job))
