@@ -1,0 +1,60 @@
+# Jobs the light-lane lint must accept. test_light_lane_lint.py runs the lint
+# over this file and expects no problems at all. Not a real workflow: it lives
+# outside .github/workflows so nothing runs it.
+name: light-lane-pass
+
+on: workflow_call
+
+jobs:
+  reusable-expression:
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: example/node-action@1111111111111111111111111111111111111111
+      - uses: example/yaml-ext@7777777777777777777777777777777777777777
+      - uses: example/composite-ok@2222222222222222222222222222222222222222
+      - uses: ./local-ok
+      - name: Words, not commands
+        run: |
+          # docker run in a comment is fine
+          echo "docker is just a word here"
+          echo docker
+          cat Dockerfile
+          export DOCKER_HOST=unused
+          npm test
+
+  plain-expression:
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: python3 -m unittest
+
+  reversed-gate-and-spacing:
+    runs-on: "${{ ('tankster-light' == vars.CI_LIGHT_RUNNER && format( 'tankster-light-{0}-{1}' , github.run_id , github.run_attempt )) || 'ubuntu-latest' }}"
+    steps:
+      - run: echo ok
+
+  first-party-action-unreadable:
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || 'ubuntu-latest' }}
+    steps:
+      # Not recorded, so it cannot be read; first-party and verified node.
+      - uses: actions/setup-node@0000000000000000000000000000000000000000
+
+  not-light-may-use-docker:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    services:
+      db:
+        image: postgres:17
+    container: node:22
+    steps:
+      - uses: docker://alpine:3
+      - uses: example/docker-action@3333333333333333333333333333333333333333
+      - run: docker compose up -d
+
+  caller-turns-light-off:
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      light: false

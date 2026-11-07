@@ -1,0 +1,4 @@
+name: node action
+runs:
+  using: node24
+  main: index.js

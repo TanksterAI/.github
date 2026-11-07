@@ -1,0 +1,6 @@
+name: local composite
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo hello

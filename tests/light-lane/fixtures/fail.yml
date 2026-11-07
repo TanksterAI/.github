@@ -1,0 +1,144 @@
+# Jobs the light-lane lint must reject. Each job's key carries an
+# `# expect:` comment with text its finding must contain, and
+# test_light_lane_lint.py checks every job is reported, with that text, and
+# nothing else is. Not a real workflow: it lives outside .github/workflows.
+name: light-lane-fail
+
+on: workflow_call
+
+x-light: &light >-
+  ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light'
+  && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+  || 'ubuntu-latest' }}
+
+jobs:
+  fixed-label: # expect: must be built as format(
+    runs-on: tankster-light
+    steps:
+      - run: echo hi
+
+  fixed-label-in-list: # expect: must be built as format(
+    runs-on: [self-hosted, tankster-light]
+    steps:
+      - run: echo hi
+
+  fixed-label-in-group: # expect: must be built as format(
+    runs-on:
+      group: ci
+      labels: [tankster-light]
+    steps:
+      - run: echo hi
+
+  run-id-only: # expect: must be built as format(
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}', github.run_id)) || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  built-outside-an-expression: # expect: must be built as format(
+    runs-on: tankster-light-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - run: echo hi
+
+  ungated: # expect: not gated by vars.CI_LIGHT_RUNNER
+    runs-on: ${{ format('tankster-light-{0}-{1}', github.run_id, github.run_attempt) }}
+    steps:
+      - run: echo hi
+
+  gate-without-label: # expect: never asks for the run-bound label
+    runs-on: ${{ vars.CI_LIGHT_RUNNER == 'tankster-light' && 'ubuntu-latest' || 'ubuntu-latest' }}
+    steps:
+      - run: echo hi
+
+  services: # expect: has services
+    runs-on: *light
+    services:
+      db:
+        image: postgres:17
+    steps:
+      - run: echo hi
+
+  container: # expect: runs in a container
+    runs-on: *light
+    container: node:22
+    steps:
+      - run: echo hi
+
+  docker-image-step: # expect: uses a Docker image
+    runs-on: *light
+    steps:
+      - uses: docker://alpine:3
+
+  docker-run: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: |
+          set -e
+          docker run --rm alpine true
+
+  sudo-docker-after-and: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: make build && sudo -E docker buildx build .
+
+  docker-in-substitution: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - run: echo "$(docker version --format '{{.Server.Version}}')"
+
+  compose: # expect: runs `docker-compose`
+    runs-on: *light
+    steps:
+      - run: docker-compose up -d
+
+  podman: # expect: runs `podman`
+    runs-on: *light
+    steps:
+      - run: /usr/bin/podman ps
+
+  docker-action: # expect: is a Docker action
+    runs-on: *light
+    steps:
+      - uses: example/docker-action@3333333333333333333333333333333333333333
+
+  composite-runs-docker: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - uses: example/composite-docker@4444444444444444444444444444444444444444
+
+  composite-wraps-docker-action: # expect: is a Docker action
+    runs-on: *light
+    steps:
+      - uses: example/composite-nested/sub@5555555555555555555555555555555555555555
+
+  local-composite-runs-docker: # expect: runs `docker`
+    runs-on: *light
+    steps:
+      - uses: ./local-docker
+
+  unreadable-action: # expect: could not read
+    runs-on: *light
+    steps:
+      - uses: example/not-recorded@8888888888888888888888888888888888888888
+
+  unreadable-local-action: # expect: could not read
+    runs-on: *light
+    steps:
+      - uses: ./no-such-action
+
+  unknown-runs-using: # expect: does not know
+    runs-on: *light
+    steps:
+      - uses: example/odd@6666666666666666666666666666666666666666
+
+  caller-passes-light-runs-on: # expect: use its light input
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || '' }}
+
+  matrix-label: # expect: strategy matrix
+    strategy:
+      matrix:
+        runner: [tankster-light]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: echo hi

@@ -1,0 +1,9 @@
+name: composite that builds an image
+runs:
+  using: composite
+  steps:
+    - name: Build
+      shell: bash
+      run: |
+        set -e
+        docker build -t x .

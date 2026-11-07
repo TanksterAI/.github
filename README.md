@@ -77,6 +77,9 @@ A consuming repo's own inline jobs should use the same expression, so the
 whole estate moves together. Passing `runs-on` explicitly still pins a job to
 one runner.
 
+Docker-free jobs can also take the light lane, a second free pool of runners
+on Cloud Run; see [Light lane](#light-lane) below.
+
 ### Advisory-first inputs
 
 `python-ci.yml` takes `lint-strict`, `security.yml` takes `audit-strict`,
@@ -102,6 +105,88 @@ advisory-first pattern -- it went live org-wide from day one, at the account
 owner's explicit instruction, rather than proving itself on one repo first.
 Said here so the inconsistency with every other workflow in this file reads as
 a deliberate choice, not an oversight.
+
+## Light lane
+
+GitHub-hosted minutes are spent, and the Cloud Build fallback (`tankster-gcb`)
+has a free tier of its own that runs out too. The light lane adds a second
+free pool: one-job runners on Cloud Run Jobs (`gh-light-runner` in
+`tankster-infra`, 1 vCPU, 4 GiB). Cloud Run has no Docker daemon, so only jobs
+that need no Docker may use it. The dispatcher, the runner image and its
+limits are described in `ci/fallback-runner/` in `tankster-infra`.
+
+**How a job asks.** With a label bound to its own run,
+`tankster-light-<run id>-<run attempt>`. A runner takes any queued job whose
+labels it has, so a fixed `tankster-light` label would let a light runner
+started for one run take a job from another, in any repository, including
+one that needs Docker. A run-bound label means a light runner only ever takes
+a job of the run it was started for, and only one that asked for the lane.
+
+**When it is open.** Only while the organisation variable `CI_LIGHT_RUNNER`
+is `tankster-light`. Unset, `off` or anything else means closed, and every
+job runs exactly where it ran before (the tests in `tests/light-lane` check
+this for every combination of inputs and variables). The dispatcher sets the
+variable, and keeps it `off` until the lane is switched on there. While the
+Cloud Run pool is capped or turned off, light jobs are still served, by Cloud
+Build, so asking for the lane never leaves a job waiting. A repository that
+cannot see the variable is never on the lane.
+
+**Which shared workflows use it.** Each Docker-free one has a `light` input,
+default `true`:
+
+| Workflow | Light lane | Why |
+|---|---|---|
+| `node-ci.yml`, `python-ci.yml`, `rust-ci.yml`, `lockfile.yml` | yes | Docker-free, but they run your commands (`test`, `verify`, ...): see opting out |
+| `workflows-lint.yml`, `runtime-gate-flows.yml`, `auto-merge-gate.yml`, `claude-address-feedback.yml`, `conflict-sweep.yml` | yes | nothing in them needs Docker |
+| `security.yml` | no | `osv-scanner-action` is a Docker action |
+| `runtime-gate.yml` | no | runs Postgres, and in `mode: docker` the app, with `docker` |
+| `lighthouse-ci.yml` | not yet | no Docker, but Chrome, its system libraries and Lighthouse's CPU-sensitive scores have not been tried on a 1-vCPU Cloud Run runner |
+| `claude-review.yml` | no | retired |
+
+**Opting out.** A caller whose own commands need Docker (testcontainers in
+the test suite, `docker compose` in `verify`, ...) passes `light: false`.
+Setting `runs-on` also takes a job off the lane. If a caller does not, the
+first Docker call on a light runner fails with a line containing
+`TANKSTER_LIGHT_NO_DOCKER`; the dispatcher records the workflow in
+`CI_LIGHT_DOCKER`, re-runs it on Cloud Build, and sends that workflow's light
+jobs to Cloud Build from then on. So the default costs a repository that
+needs Docker one failed attempt, once; `light: false` avoids even that.
+
+**Your own workflows.** A job in a consuming repo that needs no Docker joins
+the lane with:
+
+```yaml
+    runs-on: ${{ (vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+```
+
+The shared workflows use the same thing with their inputs in front:
+
+```yaml
+${{ inputs.runs-on || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light' && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt)) || vars.CI_RUNNER || 'ubuntu-latest' }}
+```
+
+**The lint.** `workflows-lint.yml`'s "Light jobs stay Docker-free" step
+checks every job whose `runs-on` mentions `tankster-light`, and fails it when:
+
+- the label is not built with exactly that `format(...)` inside an
+  expression, gated by `vars.CI_LIGHT_RUNNER == 'tankster-light'`;
+- it has `services` or a `container`, or a step uses `docker://`;
+- a `run` step calls `docker`, `docker-compose`, `podman`, `nerdctl` or
+  `buildah` as a command;
+- a step uses an action whose `action.yml`, read through the GitHub API at the
+  pinned ref with the job's token, says `runs.using: docker`. Composite
+  actions are followed into their steps. An action whose `action.yml` cannot
+  be read fails the job, except the first-party `actions/*` ones checked to
+  be node actions.
+
+It also fails a light label passed to a reusable workflow through
+`with: runs-on` (use its `light` input: only that workflow knows whether its
+jobs need Docker) or put in a strategy matrix. It matches `run` scripts as
+text, so a Docker call behind `eval`, a variable, a script file or your test
+suite is not seen; that is what the fallback above is for. Files that never
+mention `tankster-light` are skipped without being parsed. The script is
+the step's own `run:` block; `self-check.yml` runs `tests/light-lane`
+against it.
 
 ## The agent pipeline
 
@@ -359,7 +444,8 @@ consuming repo:
 
 A change here lands on every consuming repo at once. Treat it accordingly:
 
-1. Open a PR. `workflows-lint.yml` runs actionlint over the change.
+1. Open a PR. `workflows-lint.yml` runs actionlint and the light-lane lint
+   over the change, and `self-check.yml` runs their tests.
 2. Test against one consuming repo by pinning it to the branch
    (`@my-branch` instead of `@v1`) and watching a real run go green.
 3. Merge, then move the `v1` tag: run the `move-major-tag` workflow, or by
