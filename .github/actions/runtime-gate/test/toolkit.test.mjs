@@ -8,12 +8,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PNG } from 'pngjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const servers = [];
 let GOOD = '';
 let BROKEN = '';
+
+// Two well-formed PNGs (valid signature, IHDR and CRCs, a complete zlib
+// stream) whose pixel data is wrong: 50×50 RGBA with only 10 rows of data,
+// and 50 rows that all use the unknown filter type 9. pngjs's streaming
+// parser reports both from its internal row filter, not from the parser.
+const SHORT_ROWS_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAYAAAAeP4ixAAAAJElEQVR4nGNoGCaAYaAdQC0w6pHBBkY9MtjAqEcGGxj1yGADALXk6C5Ft45LAAAAAElFTkSuQmCC', 'base64');
+const BAD_FILTER_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAYAAAAeP4ixAAAAVElEQVR4nO3PQQ0AIAzAwPdcIx0TS2jInYJ2zifmdcAWIzVGaozUGKkxUmOkxkiNkRojNUZqjNQYqTFSY6TGSI2RGiM1RmqM1BipMVJjpMZIjZGaC1rziuAkV/agAAAAAElFTkSuQmCC', 'base64');
 
 // Starts the static server on a free port (port 0) and resolves with its base
 // URL once it is listening, so a test can never reach some other process that
@@ -68,16 +76,51 @@ test('healthy site passes', () => {
 test('a baseline screenshot that cannot be decoded is a warning, not a crash', () => {
   // The visual diff is advisory: an unreadable baseline (or a PNG decoder
   // that breaks on a new Node) must not stop the crawl or lose its report.
+  // Not a PNG at all fails at the signature; the other two get past the
+  // header and fail while the rows are decoded.
   const baseline = fs.mkdtempSync(path.join(os.tmpdir(), 'rg-baseline-'));
-  fs.mkdirSync(path.join(baseline, 'screens'));
-  fs.writeFileSync(path.join(baseline, 'screens', 'desktop-root.png'), 'not a png');
-  const r = run('crawl.mjs', { RG_URL: GOOD, RG_BASELINE_DIR: baseline, RG_MAX_PAGES: '2', RG_INTERACT: 'false', RG_FORMS: 'false' });
+  const screens = path.join(baseline, 'screens');
+  fs.mkdirSync(screens);
+  fs.writeFileSync(path.join(screens, 'desktop-root.png'), 'not a png');
+  fs.writeFileSync(path.join(screens, 'desktop-about.png'), SHORT_ROWS_PNG);
+  fs.writeFileSync(path.join(screens, 'desktop-hidden_from_nav.png'), BAD_FILTER_PNG);
+  const r = run('crawl.mjs', { RG_URL: GOOD, RG_BASELINE_DIR: baseline, RG_ROUTES: '/about\n/hidden-from-nav', RG_MAX_PAGES: '3', RG_INTERACT: 'false', RG_FORMS: 'false' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(fs.existsSync(path.join(r.out, 'crawl.md')), 'the summary is written');
   const report = JSON.parse(fs.readFileSync(path.join(r.out, 'crawl.json'), 'utf8'));
   assert.equal(report.baseline, 'compared');
-  const f = report.findings.find((x) => x.kind === 'visual-diff-failed');
-  assert.ok(f && !f.blocking && /desktop-root\.png/.test(f.message), JSON.stringify(report.findings, null, 1));
+  const failed = report.findings.filter((x) => x.kind === 'visual-diff-failed');
+  for (const file of ['desktop-root.png', 'desktop-about.png', 'desktop-hidden_from_nav.png']) {
+    const f = failed.find((x) => x.message.includes(file));
+    assert.ok(f && !f.blocking, `${file}: ${JSON.stringify(report.findings, null, 1)}`);
+  }
   assert.match(fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8'), /could not be compared with the baseline/);
+});
+
+test('a real visual change against the baseline is still reported, with its diff image', () => {
+  // Guards the path a passing self-baseline never reaches: comparing two
+  // different screenshots and saving the picture of the difference.
+  const first = run('crawl.mjs', { RG_URL: GOOD, RG_MAX_PAGES: '1', RG_INTERACT: 'false', RG_FORMS: 'false', RG_RETRY: 'false' });
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  const shot = path.join(first.out, 'screens', 'desktop-root.png');
+  const header = fs.readFileSync(shot);
+  // Width and height straight from IHDR, so this test does not depend on
+  // the decoder it is checking.
+  const width = header.readUInt32BE(16);
+  const height = header.readUInt32BE(20);
+  // Solid opaque black: pixelmatch blends transparency onto white, so a
+  // transparent image would look like the white page.
+  const black = new PNG({ width, height });
+  for (let i = 0; i < black.data.length; i += 4) black.data.writeUInt32BE(0x000000ff, i);
+  fs.writeFileSync(shot, PNG.sync.write(black));
+  const r = run('crawl.mjs', { RG_URL: GOOD, RG_BASELINE_DIR: first.out, RG_MAX_PAGES: '1', RG_INTERACT: 'false', RG_FORMS: 'false', RG_RETRY: 'false' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const report = JSON.parse(fs.readFileSync(path.join(r.out, 'crawl.json'), 'utf8'));
+  assert.deepEqual(report.findings.filter((x) => /^visual-diff/.test(x.kind)), [], 'the screenshots were compared and the diff saved');
+  const v = report.visual.find((x) => x.name === 'desktop-root');
+  assert.ok(v && v.ratio > 0.5, JSON.stringify(report.visual));
+  assert.ok(fs.existsSync(path.join(r.out, 'diffs', 'desktop-root.png')), 'the diff image is saved');
+  assert.match(fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8'), /Visual changes vs the default branch/);
 });
 
 test('broken site fails with every kind of breakage', () => {

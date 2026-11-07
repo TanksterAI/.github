@@ -338,6 +338,18 @@ function readPng(file) {
     // The first error rejects; a later one must not become an unhandled
     // 'error' event that kills the crawl.
     png.on('error', () => {});
+    // The streaming parser never listens for errors on its own row filter,
+    // which raises one when the pixel data is shorter than the header says or
+    // a row has a bad filter byte; unhandled, that crashes the whole crawl.
+    // Hand them to the parser's own error path, which cleans up and rejects
+    // here. This reaches into pngjs internals (_parser, _filter,
+    // _handleError), so package.json pins pngjs at exactly 7.0.0; the
+    // short-data and bad-filter cases in test/toolkit.test.mjs fail if an
+    // upgrade changes them.
+    png.once('metadata', () => {
+      const parser = png._parser;
+      parser?._filter?.on('error', (e) => parser._handleError(e));
+    });
     png.parse(fs.readFileSync(file), (err, img) => (err ? reject(err) : resolve(img)));
   });
 }
@@ -364,9 +376,7 @@ async function diff(name) {
   const ratio = changed / (width * height);
   const resized = a.width !== b.width || a.height !== b.height;
   if (ratio <= DIFF_THRESHOLD && !resized) return null;
-  ensureDir(DIFFS);
-  fs.writeFileSync(path.join(DIFFS, `${name}.png`), PNG.sync.write(d));
-  return { name, ratio, resized, before: [a.width, a.height], after: [b.width, b.height] };
+  return { name, ratio, resized, before: [a.width, a.height], after: [b.width, b.height], image: d };
 }
 
 // How much of the app's own JavaScript actually ran, from V8 block coverage
@@ -774,13 +784,26 @@ async function main() {
   if (BASE_SCREENS) {
     for (const f of fs.readdirSync(SCREENS)) {
       const name = f.replace(/\.png$/, '');
+      const where = urlByShot.get(name) || name;
       // Visual changes are advisory. A screenshot that cannot be compared is
       // a warning, and must never stop the crawl from writing its report.
+      let d;
       try {
-        const d = await diff(name);
-        if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
+        d = await diff(name);
       } catch (err) {
-        collector.add('visual-diff-failed', `could not compare ${f} with the baseline: ${String(err.message || err).split('\n')[0]}`, { blocking: false, page: urlByShot.get(name) || name });
+        collector.add('visual-diff-failed', `could not compare ${f} with the baseline: ${String(err.message || err).split('\n')[0]}`, { blocking: false, page: where });
+        continue;
+      }
+      if (!d) continue;
+      const { image, ...change } = d;
+      visual.push({ ...change, url: urlByShot.get(name) || '' });
+      // The change was found; failing to save the picture of it must not
+      // turn it into "could not compare".
+      try {
+        ensureDir(DIFFS);
+        fs.writeFileSync(path.join(DIFFS, f), PNG.sync.write(image));
+      } catch (err) {
+        collector.add('visual-diff-image-failed', `found a visual change in ${f} but could not save the diff image: ${String(err.message || err).split('\n')[0]}`, { blocking: false, page: where });
       }
     }
   }
@@ -930,6 +953,7 @@ export function renderMarkdown(r) {
       for (const v of r.visual.slice(0, 20)) {
         lines.push(`- \`${v.url || v.name}\`: ${(v.ratio * 100).toFixed(1)}% of pixels differ${v.resized ? `, size ${v.before.join('×')} → ${v.after.join('×')}` : ''}`);
       }
+      if (unreadable) lines.push(`- ${unreadable} more screenshot(s) could not be compared with the baseline (see the warnings above).`);
       lines.push('');
     } else {
       lines.push(unreadable ? `No visual changes found, but ${unreadable} screenshot(s) could not be compared with the baseline (see the warnings above).` : 'No visual changes against the last default-branch run.');
