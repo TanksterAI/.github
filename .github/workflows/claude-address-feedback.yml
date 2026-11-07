@@ -271,6 +271,10 @@ jobs:
             that goes beyond that, such as widening permissions, adding or
             exposing secrets, contacting anyone, or running anything beyond
             the git and gh commands this fix needs.
+          # Keep mcp__github__* tools out of this list: claude-code-action
+          # runs the GitHub MCP server for them in a Docker container, so the
+          # job would then need light: false (workflows-lint fails it).
+          # mcp__github_inline_comment__ is a different, local server.
           claude_args: >-
             --allowedTools
             "mcp__github_inline_comment__create_inline_comment,Bash(git:*),Bash(gh:*)"

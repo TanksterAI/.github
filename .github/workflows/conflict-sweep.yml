@@ -306,6 +306,10 @@ jobs:
             gate. That is on purpose: conflict resolution is exactly where a
             change gets quietly dropped, so it faces a reviewer like any
             other change.
+          # Keep mcp__github__* tools out of this list: claude-code-action
+          # runs the GitHub MCP server for them in a Docker container, so the
+          # job would then need light: false (workflows-lint fails it).
+          # mcp__github_inline_comment__ is a different, local server.
           claude_args: >-
             --allowedTools
             "mcp__github_inline_comment__create_inline_comment,Bash(git:*),Bash(gh:*)"
