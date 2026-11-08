@@ -51,6 +51,11 @@ on:
           the light runner stops. Either way the dispatcher re-runs the
           failed jobs on Cloud Build and keeps this workflow off the lane.
           Docker reached any other way is not caught.
+          The light image has no C/C++ toolchain (no cc, c++, make or
+          python3), so a dependency with a native addon built by node-gyp
+          also needs false; the dispatcher learns the common
+          missing-toolchain failures (see Toolchains in the README) and
+          re-runs them on Cloud Build too.
           On the light runner the dependency cache is restored, never
           saved; a build artifact (artifact-name) is still uploaded, and
           counts towards the 64 MiB.

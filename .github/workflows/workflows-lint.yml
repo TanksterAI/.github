@@ -996,11 +996,10 @@ jobs:
           set -euo pipefail
           bin="${GITHUB_WORKSPACE}/.cache/actionlint/actionlint"
           "$bin" -version
-          # actionlint skips shellcheck without a word when it is not on PATH
-          # (the light runner and the Cloud Build image have none), so a
-          # green run would look as if the run: blocks had been checked.
+          # actionlint skips shellcheck without a word when it is not on PATH,
+          # so a green run would look as if the run: blocks had been checked.
           if [ "${SHELLCHECK}" = "true" ] && ! command -v shellcheck >/dev/null; then
-            echo "::warning title=shellcheck not installed::shellcheck is not on this runner (${RUNNER_NAME:-unknown}), so actionlint did not check the run: blocks with it. They are checked on runners that have it, such as GitHub-hosted ones."
+            echo "::warning title=shellcheck missing::shellcheck is missing on this runner (${RUNNER_NAME:-unknown}), so actionlint did not check the run: blocks with it. Runners that have shellcheck check them."
           fi
           if [ "${SHELLCHECK}" = "true" ]; then
             "$bin" -color
