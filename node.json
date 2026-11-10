@@ -4,13 +4,34 @@
   "extends": ["github>TanksterAI/.github"],
   "packageRules": [
     {
-      "description": "Node itself is pinned by .nvmrc and mirrored into Docker and CI. A bump here is a coordinated change across all three.",
-      "matchDepNames": ["node"],
+      "description": "NODE RUNTIME: the newest stable Node release, not only LTS. .nvmrc holds the major line (26) and is the one source; Docker base images, engines.node, setup-node and any exact pin follow it, all in one 'Node runtime' PR so CI never sees them disagree. Renovate's node versioning counts a new major as unstable until it reaches LTS (about six months after release), so ignoreUnstable is off: a new major is offered as soon as it ships. allowedVersions \"<99\" is a semver range, which no prerelease (27.0.0-rc.1) satisfies, so alphas and release candidates stay out. rangeStrategy replace keeps a bare major bare (26 -> 27, never 26.14.0) and moves exact pins (26.13.0 -> 26.14.0); the baseline's bump would rewrite .nvmrc and node:26-slim to the full version. A new major still waits for approval on the Dependency Dashboard (the baseline major rule).",
+      "matchDatasources": ["node-version", "docker"],
+      "matchPackageNames": [
+        "node",
+        "/(?:^|/)node$/",
+        "!calico/node",
+        "!docker.io/calico/node",
+        "!ghcr.io/devcontainers/features/node",
+        "!kindest/node",
+        "!docker.io/kindest/node"
+      ],
+      "ignoreUnstable": false,
+      "allowedVersions": "<99",
+      "rangeStrategy": "replace",
+      "groupName": "Node runtime",
+      "groupSlug": "node-runtime",
       "automerge": false,
       "addLabels": ["runtime-upgrade"]
     },
     {
-      "description": "The package manager version lives in packageManager and is mirrored into the Dockerfile. Same coordination problem as Node.",
+      "description": "engines.node is \">=<major>\" and moves with .nvmrc through the custom manager below. The npm manager's own engines dep is off: replace never moves \">=26\" (every newer Node satisfies it) and bump rewrites it to \">=26.14.0\" on every release.",
+      "matchManagers": ["npm"],
+      "matchDepTypes": ["engines"],
+      "matchPackageNames": ["node"],
+      "enabled": false
+    },
+    {
+      "description": "The package manager version lives in packageManager and is mirrored into the Dockerfile. A bump is a coordinated change, never automerged.",
       "matchDepNames": ["pnpm", "npm"],
       "automerge": false,
       "addLabels": ["runtime-upgrade"]
@@ -29,6 +50,19 @@
       "groupName": "non-major (automerge)",
       "groupSlug": "non-major-automerge",
       "automerge": true
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "engines.node \">=<major>\" in any package.json: only the major is captured, so it moves with .nvmrc (\">=26\" -> \">=27\") and a minor or patch release leaves it alone. Its PR joins the Node runtime group above. An engines range in any other shape (\">=20.10\", \"^22\") is not matched and is left to the repository.",
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)package\\.json$/"],
+      "matchStrings": ["\"engines\"\\s*:\\s*\\{[^}]*?\"node\"\\s*:\\s*\">=(?<currentValue>\\d+)\""],
+      "depNameTemplate": "node",
+      "packageNameTemplate": "node",
+      "datasourceTemplate": "node-version",
+      "versioningTemplate": "node",
+      "depTypeTemplate": "engines"
     }
   ]
 }
