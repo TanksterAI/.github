@@ -10,7 +10,7 @@
       "addLabels": ["runtime-upgrade"]
     },
     {
-      "description": "NODE RUNTIME: the newest stable Node release, not only LTS. .nvmrc holds the major line (26) and is the one source; Docker base images, engines.node, setup-node and any exact pin follow it, all in one 'Node runtime' PR so CI never sees them disagree. Renovate's node versioning (and nodejs.org's index, lts: false) counts a new major as unstable until it reaches LTS, about six months after release, so ignoreUnstable is off: a new major is offered as soon as it ships. allowedVersions \"<99\" is a semver range, which no prerelease (27.0.0-rc.1) satisfies, so alphas and release candidates stay out. rangeStrategy replace keeps every value at the precision it has: a bare major stays bare (.nvmrc 26 -> 27, node:26-bookworm-slim -> node:27-bookworm-slim, never 26.14.0) and an exact pin moves to the next exact release (26.13.0 -> 26.14.0, node:26.13.0-bookworm-slim -> node:26.14.0-bookworm-slim). The baseline's bump would rewrite a bare 26 to 26.14.0, Docker tags included: workarounds:nodeDockerVersioning gives node images node versioning, not docker versioning, so docker's own tag-precision rule does not apply to them. A new major still waits for approval on the Dependency Dashboard and 7 days' age (the baseline major rule).",
+      "description": "NODE RUNTIME: the newest stable Node release, not only LTS. .nvmrc holds the major line (26) and is the one source; Docker base images, engines.node, setup-node and any exact pin follow it, all in one 'Node runtime' PR so CI never sees them disagree. Renovate's node versioning (and nodejs.org's index, lts: false) counts a new major as unstable until it reaches LTS, about six months after release, so ignoreUnstable is off: a new major is offered as soon as it ships. allowedVersions \"<99\" is a semver range, which no prerelease (27.0.0-rc.1) satisfies, so alphas and release candidates stay out. rangeStrategy replace keeps every value at the precision it has: a bare major stays bare (.nvmrc 26 -> 27, node:26-bookworm-slim -> node:27-bookworm-slim, never 26.14.0) and an exact pin moves to the next exact release (26.13.0 -> 26.14.0, node:26.13.0-bookworm-slim -> node:26.14.0-bookworm-slim). The baseline's bump would rewrite a bare 26 to 26.14.0, Docker tags included: workarounds:nodeDockerVersioning gives node images node versioning, not docker versioning, so docker's own tag-precision rule does not apply to them. A new major still opens no PR until it is ticked on the Dependency Dashboard (the baseline major rule). Release age (7 days for a major, 3 for a minor or patch, from the baseline) is not a delay here: internalChecksFilter none keeps every Node update in the branch from the moment it is found, and a release younger than its age shows as a pending renovate/stability-days status check on the PR until it is old enough. With the default strict filter, a young release was held back per dependency, so .nvmrc, engines and exact pins dropped out of the branch or fell back to the previous line (24 -> 26 instead of 27) while the Docker images moved to the new major, and the PR left them disagreeing.",
       "matchDatasources": ["node-version", "docker"],
       "matchPackageNames": [
         "node",
@@ -21,6 +21,7 @@
         "!kindest/node",
         "!docker.io/kindest/node"
       ],
+      "internalChecksFilter": "none",
       "ignoreUnstable": false,
       "allowedVersions": "<99",
       "rangeStrategy": "replace",
@@ -30,10 +31,11 @@
       "addLabels": ["runtime-upgrade"]
     },
     {
-      "description": "NODE RUNTIME, setup-node: actions/setup-node's node-version input is looked up as GitHub releases of actions/node-versions (github-actions manager), not as node-version, so the rule above does not see it. Same settings, same group; without this it would fall into the baseline's non-major GitHub Actions automerge group with bump (22 -> 22.21.0, automerged) and stop at the last LTS. A workflow using node-version-file: .nvmrc has nothing here to update.",
+      "description": "NODE RUNTIME, setup-node: actions/setup-node's node-version input is looked up as GitHub releases of actions/node-versions (github-actions manager), not as node-version, so the rule above does not see it. Same settings, same group; without this it would fall into the baseline's non-major GitHub Actions automerge group with bump (22 -> 22.21.0, automerged) and stop at the last LTS. A workflow using node-version-file: .nvmrc has nothing here to update. internalChecksFilter none for the same reason as above: release age is a status check on the PR, not a hold on this one dependency.",
       "matchManagers": ["github-actions"],
       "matchDatasources": ["github-releases"],
       "matchPackageNames": ["actions/node-versions"],
+      "internalChecksFilter": "none",
       "ignoreUnstable": false,
       "allowedVersions": "<99",
       "rangeStrategy": "replace",
@@ -43,7 +45,7 @@
       "addLabels": ["runtime-upgrade"]
     },
     {
-      "description": "NODE RUNTIME, Docker images: no release age. Docker node tags are re-pushed whenever the image is rebuilt (base OS fixes), so a tag's timestamp says nothing about the Node release, and a release-age wait on it would hold the image back from the grouped PR while .nvmrc and engines move. The node-version and setup-node dependencies in the same group still enforce the baseline's age, so the group as a whole still waits.",
+      "description": "NODE RUNTIME, Docker images: no release age. Docker node tags are re-pushed whenever the image is rebuilt (base OS fixes), and a registry may give no timestamp at all, so a tag's age says nothing about the Node release; counted, it would keep the PR's renovate/stability-days check pending for good. The node-version and setup-node dependencies in the same branch still carry the baseline's age, so the check still turns green only once the Node release itself is old enough. internalChecksFilter none, as above.",
       "matchDatasources": ["docker"],
       "matchPackageNames": [
         "node",
@@ -54,6 +56,7 @@
         "!kindest/node",
         "!docker.io/kindest/node"
       ],
+      "internalChecksFilter": "none",
       "minimumReleaseAge": null
     },
     {

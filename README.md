@@ -471,9 +471,21 @@ The estate runs the newest stable Node, not only LTS, and `.nvmrc` holds its
 major line (`26`) as the one source. The `node` preset moves every copy of that
 version together, in one `Node runtime` pull request that is never automerged
 (`renovate/node-runtime` for releases inside the line, `renovate/major-node-runtime`
-for a new major, which waits for a tick on the Dependency Dashboard and 7 days'
-age like any major). A new major is offered as soon as it ships rather than when
-it reaches LTS; prereleases (`27.0.0-rc.1`) never are.
+for a new major, which like any major opens no pull request until it is ticked
+on the Dependency Dashboard). A new major is offered as soon as it ships rather
+than when it reaches LTS; prereleases (`27.0.0-rc.1`) never are.
+
+Release age works differently here than for other dependencies: it is a status
+check, not a delay. Every Node update goes into the branch as soon as Renovate
+finds it, and while the Node release is younger than the baseline's age (7 days
+for a major, 3 for a minor or patch) the pull request carries a pending
+`renovate/stability-days` check, which turns green once it is old enough.
+Docker images do not count towards it (their tags are re-pushed on every
+rebuild); `.nvmrc`, engines, setup-node and exact pins do. The check is not
+part of `ci-gate`, so wait for it before merging. This is
+`internalChecksFilter: "none"`: with Renovate's default, a young release was
+held back one dependency at a time, and the pull request moved some copies of
+the version but not others.
 
 What Renovate tracks, and in which shape:
 
