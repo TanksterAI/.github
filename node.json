@@ -1,16 +1,73 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Node/TypeScript policy. Consume with \"extends\": [\"github>TanksterAI/.github:node\"].",
+  "description": "Node/TypeScript policy. Consume with \"extends\": [\"github>TanksterAI/.github:node\"]. Node itself tracks the newest stable release (not only LTS), with .nvmrc's major line as the one source. Renovate moves Node in these shapes, all in one 'Node runtime' PR: .nvmrc / .node-version and other node-version-datasource files (bare major kept bare, exact pins moved), Docker node images (node:26-bookworm-slim), actions/setup-node's node-version input in workflows (node-version-file has nothing to update), and engines.node written exactly \">=<major>\", \">= <major>\" or \">=<major>.0.0\". An engines.node in any other shape (\">=22.18\", \"^22\", \"22.x\") is no longer touched by Renovate and must be moved to \">=<major>\" in the repository.",
   "extends": ["github>TanksterAI/.github"],
   "packageRules": [
     {
-      "description": "Node itself is pinned by .nvmrc and mirrored into Docker and CI. A bump here is a coordinated change across all three.",
+      "description": "Node itself is pinned by .nvmrc and mirrored into Docker and CI. A bump here is a coordinated change, never automerged. Kept exactly as before the Node runtime rules below, so a dependency named node that they do not cover (an npm package called node, a custom manager on another datasource) behaves as it always did.",
       "matchDepNames": ["node"],
       "automerge": false,
       "addLabels": ["runtime-upgrade"]
     },
     {
-      "description": "The package manager version lives in packageManager and is mirrored into the Dockerfile. Same coordination problem as Node.",
+      "description": "NODE RUNTIME: the newest stable Node release, not only LTS. .nvmrc holds the major line (26) and is the one source; Docker base images, engines.node, setup-node and any exact pin follow it, all in one 'Node runtime' PR so CI never sees them disagree. Renovate's node versioning (and nodejs.org's index, lts: false) counts a new major as unstable until it reaches LTS, about six months after release, so ignoreUnstable is off: a new major is offered as soon as it ships. allowedVersions \"<99\" is a semver range, which no prerelease (27.0.0-rc.1) satisfies, so alphas and release candidates stay out. rangeStrategy replace keeps every value at the precision it has: a bare major stays bare (.nvmrc 26 -> 27, node:26-bookworm-slim -> node:27-bookworm-slim, never 26.14.0) and an exact pin moves to the next exact release (26.13.0 -> 26.14.0, node:26.13.0-bookworm-slim -> node:26.14.0-bookworm-slim). The baseline's bump would rewrite a bare 26 to 26.14.0, Docker tags included: workarounds:nodeDockerVersioning gives node images node versioning, not docker versioning, so docker's own tag-precision rule does not apply to them. A new major still opens no PR until it is ticked on the Dependency Dashboard (the baseline major rule). Release age (7 days for a major, 3 for a minor or patch, from the baseline) is not a delay here: internalChecksFilter none keeps every Node update in the branch from the moment it is found, and a release younger than its age shows as a pending renovate/stability-days status check on the PR until it is old enough. With the default strict filter, a young release was held back per dependency, so .nvmrc, engines and exact pins dropped out of the branch or fell back to the previous line (24 -> 26 instead of 27) while the Docker images moved to the new major, and the PR left them disagreeing.",
+      "matchDatasources": ["node-version", "docker"],
+      "matchPackageNames": [
+        "node",
+        "/(?:^|/)node$/",
+        "!calico/node",
+        "!docker.io/calico/node",
+        "!ghcr.io/devcontainers/features/node",
+        "!kindest/node",
+        "!docker.io/kindest/node"
+      ],
+      "internalChecksFilter": "none",
+      "ignoreUnstable": false,
+      "allowedVersions": "<99",
+      "rangeStrategy": "replace",
+      "groupName": "Node runtime",
+      "groupSlug": "node-runtime",
+      "automerge": false,
+      "addLabels": ["runtime-upgrade"]
+    },
+    {
+      "description": "NODE RUNTIME, setup-node: actions/setup-node's node-version input is looked up as GitHub releases of actions/node-versions (github-actions manager), not as node-version, so the rule above does not see it. Same settings, same group; without this it would fall into the baseline's non-major GitHub Actions automerge group with bump (22 -> 22.21.0, automerged) and stop at the last LTS. A workflow using node-version-file: .nvmrc has nothing here to update. internalChecksFilter none for the same reason as above: release age is a status check on the PR, not a hold on this one dependency.",
+      "matchManagers": ["github-actions"],
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["actions/node-versions"],
+      "internalChecksFilter": "none",
+      "ignoreUnstable": false,
+      "allowedVersions": "<99",
+      "rangeStrategy": "replace",
+      "groupName": "Node runtime",
+      "groupSlug": "node-runtime",
+      "automerge": false,
+      "addLabels": ["runtime-upgrade"]
+    },
+    {
+      "description": "NODE RUNTIME, Docker images: no release age. Docker node tags are re-pushed whenever the image is rebuilt (base OS fixes), and a registry may give no timestamp at all, so a tag's age says nothing about the Node release; counted, it would keep the PR's renovate/stability-days check pending for good. The node-version and setup-node dependencies in the same branch still carry the baseline's age, so the check still turns green only once the Node release itself is old enough. internalChecksFilter none, as above.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "node",
+        "/(?:^|/)node$/",
+        "!calico/node",
+        "!docker.io/calico/node",
+        "!ghcr.io/devcontainers/features/node",
+        "!kindest/node",
+        "!docker.io/kindest/node"
+      ],
+      "internalChecksFilter": "none",
+      "minimumReleaseAge": null
+    },
+    {
+      "description": "engines.node moves with .nvmrc through the custom manager below. The npm manager's own engines dep is off: replace never moves \">=26\" (every newer Node satisfies it) and bump rewrites it to \">=26.14.0\" on every release. Side effect: an engines.node the custom manager does not match (\">=22.18\", \"^22\") is no longer updated by Renovate at all.",
+      "matchManagers": ["npm"],
+      "matchDepTypes": ["engines"],
+      "matchPackageNames": ["node"],
+      "enabled": false
+    },
+    {
+      "description": "The package manager version lives in packageManager and is mirrored into the Dockerfile. A bump is a coordinated change, never automerged.",
       "matchDepNames": ["pnpm", "npm"],
       "automerge": false,
       "addLabels": ["runtime-upgrade"]
@@ -29,6 +86,23 @@
       "groupName": "non-major (automerge)",
       "groupSlug": "non-major-automerge",
       "automerge": true
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "engines.node in any package.json, written \">=<major>\", \">= <major>\" or \">=<major>.0.0\": only the major is captured, so it moves with .nvmrc (\">=26\" -> \">=27\", \">=26.0.0\" -> \">=27.0.0\") and a minor or patch release leaves it alone. Recursive matching finds the engines object first and then only its node entry, so the replacement never reaches another engine (\"npm\": \">=11.26.0\" stays as it is). Its PR joins the Node runtime group above. An engines range in any other shape (\">=22.18\", \"^22\") is not matched and is left to the repository.",
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)package\\.json$/"],
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "\"engines\"\\s*:\\s*\\{[^}]*\\}",
+        "\"node\"\\s*:\\s*\">=\\s*(?<currentValue>\\d+)(?:\\.0){0,2}\""
+      ],
+      "depNameTemplate": "node",
+      "packageNameTemplate": "node",
+      "datasourceTemplate": "node-version",
+      "versioningTemplate": "node",
+      "depTypeTemplate": "engines"
     }
   ]
 }

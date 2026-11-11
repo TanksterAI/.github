@@ -465,6 +465,51 @@ hand: Renovate will not touch it again.
 If this repository is private, the Renovate app must be installed on it as well
 as on the consuming repos, or preset resolution will fail.
 
+### The Node runtime (`node` preset)
+
+The estate runs the newest stable Node, not only LTS, and `.nvmrc` holds its
+major line (`26`) as the one source. The `node` preset moves every copy of that
+version together, in one `Node runtime` pull request that is never automerged
+(`renovate/node-runtime` for releases inside the line, `renovate/major-node-runtime`
+for a new major, which like any major opens no pull request until it is ticked
+on the Dependency Dashboard). A new major is offered as soon as it ships rather
+than when it reaches LTS; prereleases (`27.0.0-rc.1`) never are.
+
+Release age works differently here than for other dependencies: it is a status
+check, not a delay. Every Node update goes into the branch as soon as Renovate
+finds it, and while the Node release is younger than the baseline's age (7 days
+for a major, 3 for a minor or patch) the pull request carries a pending
+`renovate/stability-days` check, which turns green once it is old enough.
+Docker images do not count towards it (their tags are re-pushed on every
+rebuild); `.nvmrc`, engines, setup-node and exact pins do. The check is not
+part of `ci-gate`, so wait for it before merging. This is
+`internalChecksFilter: "none"`: with Renovate's default, a young release was
+held back one dependency at a time, and the pull request moved some copies of
+the version but not others.
+
+What Renovate tracks, and in which shape:
+
+| Where | Tracked shape | On a new major |
+|---|---|---|
+| `.nvmrc`, `.node-version` and other node-version files | bare major (`26`) or exact (`26.13.0`) | `27`, or the new exact release |
+| Docker `node` images (`FROM`, `ARG ...=node:...`) | a version tag (`26-bookworm-slim`, `26.13.0-bookworm-slim`), which keeps its precision | `node:27-bookworm-slim`, `node:27.0.0-bookworm-slim` |
+| `actions/setup-node` `node-version:` in workflows | bare major or exact | `27`, or the new exact release |
+| `engines.node` in any `package.json` | exactly `">=26"`, `">= 26"` or `">=26.0.0"` | `">=27"` (same shape) |
+
+- `node-version-file: .nvmrc` in a workflow has nothing to update; it follows
+  `.nvmrc`. That is the preferred form.
+- An `engines.node` in any **other** shape (`">=22.18"`, `">=22.23.4"`,
+  `"^22"`, `"22.x"`) is not touched by Renovate at all: the npm manager's own
+  `engines` dependency is off, because it would rewrite `">=26"` to
+  `">=26.14.0"` on every release. Move such a range to `">=<major>"` by hand.
+- A lagging `engines.node` that is already `">=<major>"` (say `">=22"`) is
+  raised to the newest major in the next `Node runtime` pull request, which
+  narrows who can install that package. For a published package that is a
+  breaking change to its public contract; decide it there.
+- A repository rule that sets `ignoreUnstable: true` for `node-version`
+  dependencies (the older "Track the CURRENT Node line" rules) comes after the
+  preset and undoes it: a new major is held until LTS again. Delete such rules.
+
 ### Opt-in: the `@tanksterai` UI packages
 
 A product that uses the private UI packages `@tanksterai/tokens`,
