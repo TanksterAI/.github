@@ -56,6 +56,7 @@ LIGHT_WORKFLOWS = {
     "python-ci.yml": ["verify"],
     "runtime-gate-flows.yml": ["save"],
     "rust-ci.yml": ["verify"],
+    "security.yml": ["scan"],
     "workflows-lint.yml": ["actionlint"],
 }
 # Off the lane unless a caller turns it on: the agentic sessions, because a
@@ -63,11 +64,12 @@ LIGHT_WORKFLOWS = {
 # rust-ci, because the light image has no C linker or rustup.
 LIGHT_OFF_BY_DEFAULT = {"claude-address-feedback.yml", "conflict-sweep.yml", "rust-ci.yml"}
 # They run the caller's installs, which may compile native code: their light
-# input says the light image has no compiler.
-NO_TOOLCHAIN_NOTE = {"node-ci.yml", "python-ci.yml", "lockfile.yml"}
+# input says the light image has no compiler (security.yml's python audit
+# installs the caller's package).
+NO_TOOLCHAIN_NOTE = {"node-ci.yml", "python-ci.yml", "lockfile.yml", "security.yml"}
 # These keep their runner expression: Docker (or, for lighthouse-ci, Chrome
 # and its system libraries, not yet tried on Cloud Run).
-NOT_LIGHT = ["lighthouse-ci.yml", "runtime-gate.yml", "security.yml", "claude-review.yml"]
+NOT_LIGHT = ["lighthouse-ci.yml", "runtime-gate.yml", "claude-review.yml"]
 
 
 def _extract_script():
@@ -146,6 +148,7 @@ class Summaries(lint.Resolver):
         "actions/setup-node@v7.0.0": "node24",
         "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": "node24",
         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97": "node24",
+        "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e": "node24",
         "actions/upload-artifact@v7.0.1": "node24",
         "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333": "node24",
         "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": "node24",
@@ -165,6 +168,9 @@ class Summaries(lint.Resolver):
         "anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b": [
             "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
         ],
+        # One sh step that runs main.sh (prebuilt binaries over curl) and a
+        # pwsh step for Windows; neither calls a container tool.
+        "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29": [],
     }
 
     def __init__(self):
@@ -669,6 +675,9 @@ class ShippedWorkflows(unittest.TestCase):
                         self.assertIn(off, step.get("if", ""), where)
                     if uses.startswith("Swatinem/rust-cache@"):
                         self.assertIn(off, str(with_.get("save-if", "")), where)
+                    if uses.startswith("actions/setup-go@"):
+                        cache = str(with_.get("cache", "true")).lower()
+                        self.assertTrue(cache == "false" or off in cache, where)
                     if uses.startswith("actions/setup-node@"):
                         self.assertIn(off, str(with_.get("package-manager-cache", "")), where)
                         if "cache" in with_:

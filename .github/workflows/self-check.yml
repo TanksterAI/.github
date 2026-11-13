@@ -76,6 +76,35 @@ jobs:
           done < <(grep -hoE 'github>[A-Za-z0-9._/-]+(:[A-Za-z0-9_-]+)?' ./*.json | sort -u)
           exit $fail
 
+      # security.yml pins osv-scanner and gitleaks by version and SHA-256, and
+      # Renovate bumps only the version: this fails such a pull request until
+      # the checksum is the one the release publishes.
+      - name: Scanner checksums match their releases
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          wf=.github/workflows/security.yml
+          get() { yq ".on.workflow_call.inputs.\"$1\".default" "$wf"; }
+          sums() { curl -fsSL --retry 3 "$1" | awk -v f="$2" '$2 == f { print $1 }'; }
+          fail=0
+          check() {
+            if [ -n "$3" ] && [ "$3" = "$4" ]; then
+              echo "ok  $1 v$2"
+            else
+              echo "::error file=${wf}::$1 v$2: its SHA-256 input should be ${3:-<not in the release checksums>}"
+              fail=1
+            fi
+          }
+          v="$(get osv-version)"
+          check osv-scanner "$v" \
+            "$(sums "https://github.com/google/osv-scanner/releases/download/v${v}/osv-scanner_SHA256SUMS" osv-scanner_linux_amd64)" \
+            "$(get osv-sha256)"
+          v="$(get gitleaks-version)"
+          check gitleaks "$v" \
+            "$(sums "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_checksums.txt" "gitleaks_${v}_linux_x64.tar.gz")" \
+            "$(get gitleaks-sha256)"
+          exit "$fail"
+
       # Runs the runner guard's own script, taken straight from
       # workflows-lint.yml, over tests/runner-guard. It must report exactly the
       # lines marked expect-flag, with the right line numbers, and the error
