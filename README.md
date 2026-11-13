@@ -105,9 +105,12 @@ call `lighthouse-ci.yml` from a job that `needs` it, with `artifact-name` (and
 `artifact-path`, where the lighthouserc file's `collect.staticDistDir` points).
 Install and build are skipped, so private packages need no token in that job,
 and the pages audited are the pages that ship. With `staticDistDir`, give
-`collect.url` as paths (`"/"`, `"/about.html"`) or `localhost` URLs: lhci
-serves the folder on a port of its own and swaps only the port, so a remote
-URL such as a staging host would be audited there, not the artifact.
+`collect.url` as paths (`"/"`, `"/about.html"`) or `http://localhost` URLs:
+lhci serves the folder over plain HTTP on a port of its own and swaps only the
+port, keeping the host and scheme, so a remote URL such as a staging host would
+be audited there, not the artifact, and an `https://localhost` URL would fail.
+`artifact-name` and `artifact-path` arrived in `v1` on 13 November 2026; a
+caller pinned to an older SHA of this workflow has to move its pin first.
 
 ```yaml
   build:
