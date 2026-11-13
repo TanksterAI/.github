@@ -144,7 +144,7 @@ default `true` except where the table says otherwise:
 | `rust-ci.yml` | off by default (`light: true` opts in) | every Rust build needs a C linker, and the light image has no C toolchain and no rustup: the job would fail with `rustup: command not found`. The dispatcher learns that and re-runs it on Cloud Build (see toolchains), but only after one failed light execution for each caller's workflow, which every Rust caller would waste. Turn it on only once the image has them |
 | `workflows-lint.yml`, `runtime-gate-flows.yml`, `auto-merge-gate.yml` | yes | nothing in them needs Docker, and they send little |
 | `claude-address-feedback.yml`, `conflict-sweep.yml` | off by default (`light: true` opts in) | no Docker, but every model request resends the conversation, so a long session can pass the egress limit, and the re-run on Cloud Build would repeat the session: its model usage, and any pushes or comments the first attempt made. Turn it on only once their egress has been measured |
-| `security.yml` | no | `osv-scanner-action` is a Docker action |
+| `security.yml` | yes | osv-scanner and gitleaks are release binaries checked against a pinned SHA-256, installed without sudo; the scan uploads nothing |
 | `runtime-gate.yml` | no | runs Postgres, and in `mode: docker` the app, with `docker` |
 | `lighthouse-ci.yml` | not yet | no Docker, but Chrome, its system libraries and Lighthouse's CPU-sensitive scores have not been tried on a 1-vCPU Cloud Run runner |
 | `claude-review.yml` | no | retired |
@@ -410,8 +410,9 @@ CodeQL workflow would fail on the repos that need it most. What is here works on
 every repo at no cost:
 
 - **osv-scanner** -- vulnerable dependencies across npm, PyPI, crates and Go.
-  Uses the `osv-scanner-action` sub-action, not the reusable workflow, because
-  the reusable one uploads SARIF.
+  The release binary, pinned by version and SHA-256 (`osv-version`,
+  `osv-sha256`), not `osv-scanner-action`: that is a Docker action, which the
+  light runner cannot run, and its reusable workflow uploads SARIF.
 - **gitleaks** -- secrets, in CLI form. The gitleaks *Action* requires a licence
   key for organisation-owned repositories; the MIT-licensed CLI does not.
 - **npm audit / pip-audit / cargo-audit** -- ecosystem advisories. Advisory,
