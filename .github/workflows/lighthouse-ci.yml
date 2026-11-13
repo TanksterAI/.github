@@ -337,9 +337,11 @@ jobs:
         # every run died with "No usable sandbox!" (tankster-ai-public job
         # 116013940439). --no-sandbox is the usual fix for Chrome in a
         # container, and --disable-dev-shm-usage avoids Docker's 64 MB
-        # /dev/shm. Set through LHCI's environment and only there, so it
-        # replaces a repo's own collect.settings.chromeFlags on those runners
-        # alone.
+        # /dev/shm. They are added by a wrapper that CHROME_PATH points at,
+        # not through lhci's settings: LHCI_COLLECT__SETTINGS__CHROME_FLAGS
+        # replaced the repo's whole collect.settings object (skipAudits,
+        # throttling, form factor), and a puppeteerScript's own launch never
+        # read it.
         run: |
           set -euo pipefail
           # Exported only when set, so an empty value never masks a CHROME_PATH
@@ -348,7 +350,19 @@ jobs:
             export CHROME_PATH="${SETUP_CHROME_PATH}"
           fi
           if [ "${SELF_HOSTED}" = "true" ]; then
-            export LHCI_COLLECT__SETTINGS__CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage"
+            real="${CHROME_PATH:-}"
+            if [ -z "${real}" ]; then
+              for b in google-chrome google-chrome-stable chromium chromium-browser; do
+                real="$(command -v "$b")" && break
+              done
+            fi
+            if [ -n "${real}" ]; then
+              wrapper="${RUNNER_TEMP}/chrome-no-sandbox"
+              printf '#!/bin/sh\nexec "%s" --no-sandbox --disable-dev-shm-usage "$@"\n' "${real}" > "${wrapper}"
+              chmod 0755 "${wrapper}"
+              export CHROME_PATH="${wrapper}"
+              echo "Chrome for lhci: ${real}, through ${wrapper}"
+            fi
           fi
           npx --yes "@lhci/cli@${LHCI_VERSION}" autorun
 
