@@ -56,6 +56,7 @@ LIGHT_WORKFLOWS = {
     "python-ci.yml": ["verify"],
     "runtime-gate-flows.yml": ["save"],
     "rust-ci.yml": ["verify"],
+    "security.yml": ["scan"],
     "workflows-lint.yml": ["actionlint"],
 }
 # Off the lane unless a caller turns it on: the agentic sessions, because a
@@ -67,7 +68,7 @@ LIGHT_OFF_BY_DEFAULT = {"claude-address-feedback.yml", "conflict-sweep.yml", "ru
 NO_TOOLCHAIN_NOTE = {"node-ci.yml", "python-ci.yml", "lockfile.yml"}
 # These keep their runner expression: Docker (or, for lighthouse-ci, Chrome
 # and its system libraries, not yet tried on Cloud Run).
-NOT_LIGHT = ["lighthouse-ci.yml", "runtime-gate.yml", "security.yml", "claude-review.yml"]
+NOT_LIGHT = ["lighthouse-ci.yml", "runtime-gate.yml", "claude-review.yml"]
 
 
 def _extract_script():
@@ -165,6 +166,9 @@ class Summaries(lint.Resolver):
         "anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b": [
             "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
         ],
+        # One sh step that runs main.sh (prebuilt binaries over curl) and a
+        # pwsh step for Windows; neither calls a container tool.
+        "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29": [],
     }
 
     def __init__(self):
