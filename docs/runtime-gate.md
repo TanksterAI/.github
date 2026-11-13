@@ -18,6 +18,7 @@ cases to write or maintain.
 |---|---|---|
 | **Crawl** | **Yes** | See below. |
 | **Visual diff** | No (advisory) | Every screenshot is compared with the last successful run on the base branch. Changes over 0.2% of pixels are listed in the PR comment, with diff images in the artifact. |
+| **Lighthouse** | No (advisory) | Performance, accessibility, best practices and SEO scores for the first `lighthouse-pages` (default 3) pages the crawl reached signed out, in the job summary and the PR comment. See [Lighthouse](#lighthouse). |
 | **AI explorer** | No (advisory) | See below. |
 
 **Crawl.** It finds pages from `/`, any `routes` you list, `sitemap.xml` and
@@ -155,6 +156,7 @@ dry-run mode.
 | `http-user`, `http-password` | Get past a staging basic-auth gate. Use dummy CI values. |
 | `browser` | Choose `chromium` (the default), `chrome`, `firefox` or `webkit`. |
 | `headed` | Set to `true` to run the browser with a visible window on a virtual display. |
+| `lighthouse`, `lighthouse-pages` | Turn the advisory Lighthouse scores off, or audit more or fewer pages (see [Lighthouse](#lighthouse)). |
 
 ### When the AI explorer runs
 
@@ -276,6 +278,30 @@ The default branch's numbers travel with the visual baseline, so a PR shows
 the change, for example "routes −2, JS −6.3 pts". A drop means the crawl
 reached less of the app than before: a route that now redirects, a menu that
 no longer opens, a code-split chunk that no longer loads. It is advisory.
+
+### Lighthouse
+
+After the crawl and the explorer, Lighthouse audits the first
+`lighthouse-pages` (default 3) pages the crawl reached signed out that answered
+200 with a page title, so an API's JSON or an error page is never scored. It
+runs once per page, in the runner's Chrome where there is one and otherwise the
+Chromium the crawl installed, and reports performance, accessibility, best
+practices and SEO in the job summary and the PR comment; the full reports are
+in the artifact under `lighthouse/`. A score is green from 90 (95 for
+accessibility); anything lower is amber or red in the table and a warning in
+the step log, never blocking. When Lighthouse cannot run or does not finish,
+the comment says so instead of leaving the section out.
+
+With `http-user`, Lighthouse sends the same HTTP Basic credentials. It sends
+them with every request a page makes, third-party ones included, which is one
+more reason `http-password` must be the dummy CI value it asks for. The header
+is masked in the log and redacted from the saved reports.
+
+Treat the numbers as a trend for this repository: one run on a shared CI
+runner, against an app started for the test, is not PageSpeed. Turn it off with
+`lighthouse: false`. It takes at most 8 minutes, and less when the job is near
+its `timeout-minutes`, so it never turns a passing gate red. A repository that wants its own budgets, more runs, or audits of a
+built static site uses `lighthouse-ci.yml` instead (see the README).
 
 ### Giving the explorer hints
 
