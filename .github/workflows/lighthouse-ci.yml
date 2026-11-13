@@ -11,6 +11,16 @@
 # A repo with no lighthouserc file yet needs one before this does anything
 # useful — see lighthouserc.example.json in this repository for a starting
 # point pitched at the advisory-first house style (warn, not error).
+#
+# Two ways to get the site under test:
+#   - build here (the default): install, run `build`, then lhci serves the
+#     output or runs the lighthouserc file's startServerCommand;
+#   - audit the caller's own build (`artifact-name`): a job earlier in the same
+#     run uploads its static output, and this job downloads it and skips
+#     install and build. Nothing is built twice, the pages audited are the
+#     pages that ship, and private packages (GitHub Packages) need no token
+#     here. Point the lighthouserc file's collect.staticDistDir at
+#     `artifact-path`.
 name: lighthouse-ci
 
 on:
@@ -45,6 +55,22 @@ on:
           starting — uncommon, but some setups do it that way.
         type: string
         default: npm run build
+      artifact-name:
+        description: >-
+          Audit a build artifact instead of building here: the name of an
+          artifact uploaded earlier in the same workflow run (the calling job
+          needs that job). Install and build are skipped, and Node comes from
+          node-version, else the current LTS, not the repo's version file:
+          only lhci runs here, and it is tested against LTS releases. Empty
+          (the default) builds here.
+        type: string
+        default: ""
+      artifact-path:
+        description: >-
+          Where to unpack artifact-name, relative to the checkout. Point the
+          lighthouserc file's collect.staticDistDir here.
+        type: string
+        default: dist
       lhci-version:
         description: >-
           @lhci/cli version to pin. Keep this in step across repos so a
@@ -99,7 +125,7 @@ jobs:
       # write on the job that calls this workflow.
       pull-requests: write
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # This job runs npx-fetched third-party code (@lhci/cli) and holds
           # pull-requests: write. Neither needs a persisted git credential —
@@ -108,8 +134,8 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        if: inputs.package-manager == 'pnpm'
-        uses: pnpm/action-setup@v6.0.10
+        if: inputs.package-manager == 'pnpm' && inputs.artifact-name == ''
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: ${{ inputs.pnpm-version }}
 
@@ -120,6 +146,18 @@ jobs:
         id: node
         run: |
           set -euo pipefail
+          # Auditing an artifact: nothing of the repo's is installed or run,
+          # only lhci, so use the version lhci is tested on rather than the
+          # repo's (which may track a Node release lhci has not met yet).
+          if [ -n "${ARTIFACT}" ]; then
+            {
+              echo "file="
+              echo "version=${VERSION:-lts/*}"
+              echo "lockfile=false"
+              echo "cache="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -n "${VERSION_FILE}" ] && [ -f "${VERSION_FILE}" ]; then
             echo "file=${VERSION_FILE}" >> "$GITHUB_OUTPUT"
             echo "version=" >> "$GITHUB_OUTPUT"
@@ -149,8 +187,9 @@ jobs:
           VERSION_FILE: ${{ inputs.node-version-file }}
           VERSION: ${{ inputs.node-version }}
           PM: ${{ inputs.package-manager }}
+          ARTIFACT: ${{ inputs.artifact-name }}
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: ${{ steps.node.outputs.file }}
           node-version: ${{ steps.node.outputs.version }}
@@ -163,6 +202,7 @@ jobs:
           package-manager-cache: ${{ steps.node.outputs.lockfile == 'true' }}
 
       - name: Install dependencies
+        if: inputs.artifact-name == ''
         run: |
           set -euo pipefail
           if [ -n "${INSTALL}" ]; then
@@ -183,9 +223,20 @@ jobs:
           PM: ${{ inputs.package-manager }}
           HAS_LOCK: ${{ steps.node.outputs.lockfile }}
 
+      # The command arrives through env, not ${{ }} interpolation, so the
+      # caller's string is never pasted into the script text.
       - name: Build
-        if: inputs.build != ''
-        run: ${{ inputs.build }}
+        if: inputs.build != '' && inputs.artifact-name == ''
+        run: eval "${BUILD}"
+        env:
+          BUILD: ${{ inputs.build }}
+
+      - name: Download the build artifact
+        if: inputs.artifact-name != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
 
       - name: Check for a lighthouserc file
         id: config
@@ -303,7 +354,7 @@ jobs:
 
       - name: Upload Lighthouse results
         if: always() && steps.config.outputs.found == 'true'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lighthouse-results
           path: .lighthouseci/
@@ -323,7 +374,7 @@ jobs:
         # of strict. Losing the comment shouldn't fail the check — the
         # Lighthouse run itself already succeeded or failed on its own terms.
         continue-on-error: true
-        uses: actions/github-script@v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           STRICT: ${{ inputs.strict }}
         with:
