@@ -24,6 +24,12 @@
 # No step pushes, so the checkout keeps no token: the audit step installs and
 # runs third-party code (pip install), which must not find it in
 # .git/config. Actions are pinned to commit SHAs.
+#
+# DOCKER-FREE, so it can run on the light lane (Cloud Run, no Docker, no
+# sudo). osv-scanner is the release binary rather than google's
+# osv-scanner-action, which is a Docker action; both run the same
+# osv-scanner with the same arguments. gitleaks and osv-scanner go into
+# $RUNNER_TEMP/bin, checked against pinned SHA-256 sums, without sudo.
 name: security
 
 on:
@@ -38,12 +44,33 @@ on:
           Runner label. Empty (the default) follows the organisation's
           CI_RUNNER variable, which moves CI onto the Cloud Build fallback
           runner when the included Actions minutes run out, and means
-          ubuntu-latest when that variable is unset.
+          ubuntu-latest when that variable is unset. A value here also
+          overrides light.
         type: string
         default: ""
+      light:
+        description: >-
+          Run on the Cloud Run light runner, which has no Docker, once the
+          organisation opens the light lane (CI_LIGHT_RUNNER is
+          tankster-light). Until then, or when runs-on is set, it changes
+          nothing. Nothing in this workflow needs Docker or sudo, and it
+          uploads nothing, so it stays far below the 64 MiB a light job may
+          send; false keeps it off the lane anyway. If a scan does fail
+          there for want of Docker, the dispatcher re-runs it on Cloud Build.
+        type: boolean
+        default: true
       osv:
         type: boolean
         default: true
+      osv-version:
+        description: >-
+          osv-scanner release. Change osv-sha256 with it: the checksum of
+          osv-scanner_linux_amd64 in that release's osv-scanner_SHA256SUMS.
+        type: string
+        default: 2.5.0
+      osv-sha256:
+        type: string
+        default: edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
       osv-scan-args:
         description: Newline-separated osv-scanner arguments.
         type: string
@@ -54,8 +81,14 @@ on:
         type: boolean
         default: true
       gitleaks-version:
+        description: >-
+          gitleaks release. Change gitleaks-sha256 with it: the checksum of
+          gitleaks_<version>_linux_x64.tar.gz in that release's checksums.
         type: string
         default: 8.30.1
+      gitleaks-sha256:
+        type: string
+        default: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
       gitleaks-history:
         description: >-
           Scan full git history rather than just the working tree. Slower, but a
@@ -94,7 +127,13 @@ jobs:
     if: >-
       inputs.osv || inputs.gitleaks ||
       (inputs.ecosystem != 'none' && (inputs.audit-strict || github.event_name != 'pull_request'))
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Light lane, run-bound so a light runner only ever takes a job of this
+    # run: see "Light lane" in the README.
+    runs-on: >-
+      ${{ inputs.runs-on
+      || (inputs.light && vars.CI_LIGHT_RUNNER == 'tankster-light'
+      && format('tankster-light-{0}-{1}', github.run_id, github.run_attempt))
+      || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -108,18 +147,55 @@ jobs:
           # `x && 0 || 1` always yields 1. The strings are both truthy.
           fetch-depth: ${{ inputs.gitleaks && inputs.gitleaks-history && '0' || '1' }}
 
-      # The sub-action, not the reusable workflow: the reusable one uploads
+      # The release binary, not google/osv-scanner-action (a Docker action,
+      # so never on the light lane) nor its reusable workflow (that uploads
       # SARIF to code scanning, which needs GitHub Code Security on private
-      # repos. This one just scans and exits non-zero on findings.
-      # continue-on-error so gitleaks still runs; the verdict step below fails
-      # the job on its outcome.
-      - name: Vulnerable dependencies (osv-scanner)
-        id: osv
+      # repos). Same osv-scanner, same arguments: it scans and exits
+      # non-zero on findings. continue-on-error so gitleaks still runs; the
+      # verdict step below fails the job on its outcome, and an install
+      # that failed counts as a failure there too.
+      - name: Install osv-scanner
+        id: osv-install
         if: inputs.osv
         continue-on-error: true
-        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
-        with:
-          scan-args: ${{ inputs.osv-scan-args }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bin"
+          curl -fsSL --retry 3 \
+            "https://github.com/google/osv-scanner/releases/download/v${VERSION}/osv-scanner_linux_amd64" \
+            -o "${RUNNER_TEMP}/bin/osv-scanner"
+          echo "${SHA256}  ${RUNNER_TEMP}/bin/osv-scanner" | sha256sum -c -
+          chmod 0755 "${RUNNER_TEMP}/bin/osv-scanner"
+          "${RUNNER_TEMP}/bin/osv-scanner" --version
+        env:
+          VERSION: ${{ inputs.osv-version }}
+          SHA256: ${{ inputs.osv-sha256 }}
+
+      - name: Vulnerable dependencies (osv-scanner)
+        id: osv
+        if: inputs.osv && steps.osv-install.outcome == 'success'
+        continue-on-error: true
+        # As the action's entrypoint (exit_code_redirect.sh in osv-scanner
+        # v2.5.0) did: the arguments split on any whitespace, and exit 128
+        # (no lockfiles found) is a pass with a warning unless the arguments
+        # say --allow-no-lockfiles=false.
+        run: |
+          set -euo pipefail
+          mapfile -t args < <(printf '%s' "${SCAN_ARGS}" | tr -s '[:space:]' '\n' | sed '/^$/d')
+          status=0
+          "${RUNNER_TEMP}/bin/osv-scanner" "${args[@]}" || status=$?
+          if [ "${status}" -eq 128 ]; then
+            case " ${args[*]} " in
+              *" --allow-no-lockfiles=false "* | *" -allow-no-lockfiles=false "*) ;;
+              *)
+                echo "::warning title=osv-scanner found no lockfiles::nothing was scanned; pass --allow-no-lockfiles to silence this"
+                status=0
+                ;;
+            esac
+          fi
+          exit "${status}"
+        env:
+          SCAN_ARGS: ${{ inputs.osv-scan-args }}
 
       - name: Install gitleaks
         id: gitleaks-install
@@ -128,12 +204,14 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
-          curl -fsSL --retry 3 "$url" -o /tmp/gitleaks.tar.gz
-          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
-          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
-          gitleaks version
+          curl -fsSL --retry 3 "$url" -o "${RUNNER_TEMP}/gitleaks.tar.gz"
+          echo "${SHA256}  ${RUNNER_TEMP}/gitleaks.tar.gz" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}/bin" gitleaks
+          "${RUNNER_TEMP}/bin/gitleaks" version
         env:
           VERSION: ${{ inputs.gitleaks-version }}
+          SHA256: ${{ inputs.gitleaks-sha256 }}
 
       - name: Secrets (gitleaks)
         id: gitleaks
@@ -142,9 +220,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${HISTORY}" = "true" ]; then
-            gitleaks git . --redact --verbose --exit-code 1
+            "${RUNNER_TEMP}/bin/gitleaks" git . --redact --verbose --exit-code 1
           else
-            gitleaks dir . --redact --verbose --exit-code 1
+            "${RUNNER_TEMP}/bin/gitleaks" dir . --redact --verbose --exit-code 1
           fi
         env:
           HISTORY: ${{ inputs.gitleaks-history }}
@@ -158,6 +236,9 @@ jobs:
           (inputs.audit-strict || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         with:
           node-version-file: ${{ inputs.node-version-file }}
+          # Nothing is saved on the light runner (runner name crj-): a
+          # package store can be more than the 64 MiB a light job may send.
+          package-manager-cache: ${{ !startsWith(runner.name, 'crj-') }}
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         # Advisory unless strict: a failed install must not turn the run red.
@@ -233,12 +314,12 @@ jobs:
             echo
             echo "| Scanner | Outcome |"
             echo "|---|---|"
-            echo "| osv-scanner (blocking) | ${OSV:-skipped} |"
+            echo "| osv-scanner (blocking) | ${OSV_INSTALL:+install ${OSV_INSTALL}, }scan ${OSV:-skipped} |"
             echo "| gitleaks (blocking) | ${GITLEAKS_INSTALL:+install ${GITLEAKS_INSTALL}, }scan ${GITLEAKS:-skipped} |"
             echo "| ${ECOSYSTEM} audit ($([ "${STRICT}" = "true" ] && echo blocking || echo "advisory, weekly")) | ${AUDIT:-skipped} |"
           } >> "$GITHUB_STEP_SUMMARY"
           failed=0
-          for pair in "osv-scanner:${OSV}" "gitleaks install:${GITLEAKS_INSTALL}" "gitleaks:${GITLEAKS}"; do
+          for pair in "osv-scanner install:${OSV_INSTALL}" "osv-scanner:${OSV}" "gitleaks install:${GITLEAKS_INSTALL}" "gitleaks:${GITLEAKS}"; do
             if [ "${pair#*:}" = "failure" ]; then
               echo "::error title=${pair%%:*} failed::see its step above"
               failed=1
@@ -254,6 +335,7 @@ jobs:
           fi
           exit "${failed}"
         env:
+          OSV_INSTALL: ${{ steps.osv-install.outcome }}
           OSV: ${{ steps.osv.outcome }}
           GITLEAKS_INSTALL: ${{ steps.gitleaks-install.outcome }}
           GITLEAKS: ${{ steps.gitleaks.outcome }}
