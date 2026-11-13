@@ -18,7 +18,10 @@
 #                          blocking; known ones can be quarantined. Reports
 #                          route/control/form/JS coverage vs the base branch.
 #   2. visual (advisory)   screenshots compared with the last default-branch run.
-#   3. explore (advisory)  Gemini uses the app like a person, by look and feel,
+#   3. lighthouse          performance, accessibility, best practices and SEO
+#      (advisory)          scores for the first pages the crawl reached signed
+#                          out, one run each, in the browser the crawl used.
+#   4. explore (advisory)  Gemini uses the app like a person, by look and feel,
 #                          for major or framework updates, labelled PRs,
 #                          schedules and manual runs. Free tier; needs the
 #                          GEMINI_API_KEY secret, skips itself without it.
@@ -255,6 +258,18 @@ on:
         description: Prompt-injection screening before the model sees a page - model (heuristics plus a small classifier), heuristic or off.
         type: string
         default: model
+      lighthouse:
+        description: >-
+          Advisory Lighthouse scores (performance, accessibility, best practices,
+          SEO) for the first pages the crawl reached signed out, in the job
+          summary and the PR comment, with the full reports in the artifact.
+          Never changes the verdict. Skipped when http-user is set.
+        type: boolean
+        default: true
+      lighthouse-pages:
+        description: How many of the crawled pages Lighthouse audits, one run each.
+        type: number
+        default: 3
       comment:
         description: Post a sticky PR comment with the results.
         type: boolean
@@ -622,6 +637,127 @@ jobs:
           headed: ${{ inputs.headed }}
           baseline-dir: ${{ steps.baseline.outputs.run-id != '' && format('{0}/rg-baseline', runner.temp) || '' }}
 
+      # Lighthouse (advisory) over the first pages the crawl reached signed out
+      # that answered 200 with a page title, so an API's JSON or an error page
+      # is never scored. Its own LTS Node, so the toolkit's or the app's Node
+      # (which may be a release lhci has not met) does not matter; the explorer
+      # after it needs only Node 22 or later.
+      - name: Node for Lighthouse
+        id: lh-node
+        if: inputs.lighthouse && inputs.http-user == '' && steps.crawl.outcome != 'skipped'
+        continue-on-error: true
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+          package-manager-cache: false
+
+      - name: Lighthouse (advisory)
+        if: steps.lh-node.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          crawl="${RG_REPORT}/crawl.json"
+          out="${RG_REPORT}/lighthouse"
+          if [ ! -f "${crawl}" ]; then
+            echo "No crawl report, so no pages to audit."
+            exit 0
+          fi
+          mapfile -t urls < <(node -e '
+            const r = require(process.argv[1]);
+            const max = Number(process.argv[2]);
+            const base = new URL(r.url);
+            const seen = new Set();
+            const out = [];
+            for (const p of r.pages || []) {
+              if (p.signedIn || p.status !== 200 || !p.title) continue;
+              let u;
+              try { u = new URL(p.finalUrl || p.url); } catch { continue; }
+              if (u.origin !== base.origin) continue;
+              u.hash = "";
+              if (seen.has(u.href)) continue;
+              seen.add(u.href);
+              out.push(u.href);
+              if (out.length >= max) break;
+            }
+            if (out.length) console.log(out.join("\n"));
+          ' "${crawl}" "${PAGES}")
+          if [ "${#urls[@]}" -eq 0 ]; then
+            echo "The crawl reached no signed-out page with a title, so Lighthouse has nothing to audit."
+            exit 0
+          fi
+
+          # The branded Chrome where the runner has one (GitHub-hosted runners
+          # do), else the Chromium the crawl installed. That Chromium runs
+          # without the sandbox, as Playwright runs it; so does any Chrome on a
+          # self-hosted runner, whose container cannot create the user
+          # namespaces the sandbox needs. The flags are added by a wrapper,
+          # not lhci settings, which they would replace wholesale.
+          chrome="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          nosandbox="${SELF_HOSTED}"
+          if [ -z "${chrome}" ]; then
+            chrome="$(find "${PLAYWRIGHT_BROWSERS_PATH:-${HOME}/.cache/ms-playwright}" -path '*/chromium-*/chrome-linux*/chrome' -type f 2>/dev/null | sort -V | tail -n 1 || true)"
+            nosandbox=true
+          fi
+          if [ -z "${chrome}" ]; then
+            echo "::notice title=Lighthouse skipped::no Chrome or Playwright Chromium on this runner (browser: ${BROWSER})."
+            exit 0
+          fi
+          work="${RUNNER_TEMP}/rg-lighthouse"
+          rm -rf "${work}"
+          mkdir -p "${work}" "${out}"
+          cd "${work}"
+          if [ "${nosandbox}" = "true" ]; then
+            printf '#!/bin/sh\nexec "%s" --no-sandbox --disable-dev-shm-usage "$@"\n' "${chrome}" > "${work}/chrome"
+            chmod 0755 "${work}/chrome"
+            export CHROME_PATH="${work}/chrome"
+          else
+            export CHROME_PATH="${chrome}"
+          fi
+          echo "Lighthouse: ${chrome} on ${#urls[@]} page(s)"
+
+          # Its own config in an empty directory, so a lighthouserc file in the
+          # repository (written for lighthouse-ci.yml) is not picked up here.
+          node -e '
+            const [outDir, ...url] = process.argv.slice(1);
+            const warn = (minScore) => ["warn", { minScore }];
+            require("fs").writeFileSync("lighthouserc.json", JSON.stringify({ ci: {
+              collect: { url, numberOfRuns: 1 },
+              assert: { assertions: {
+                "categories:performance": warn(0.9),
+                "categories:accessibility": warn(0.95),
+                "categories:best-practices": warn(0.9),
+                "categories:seo": warn(0.9),
+              } },
+              upload: { target: "filesystem", outputDir: outDir },
+            } }));
+          ' "${out}" "${urls[@]}"
+          npx --yes "@lhci/cli@${LHCI_VERSION}" autorun
+
+          # shellcheck disable=SC2016 # JavaScript template literals, not shell
+          node -e '
+            const fs = require("fs");
+            const [outDir, base, md] = process.argv.slice(1);
+            const runs = JSON.parse(fs.readFileSync(`${outDir}/manifest.json`, "utf8")).filter((r) => r.isRepresentativeRun);
+            const grade = (s) => (s == null ? "—" : `${Math.round(s * 100) >= 90 ? "🟢" : Math.round(s * 100) >= 50 ? "🟠" : "🔴"} ${Math.round(s * 100)}`);
+            const page = (u) => { const x = new URL(u); return x.origin === base ? (x.pathname + x.search) : u; };
+            const rows = runs.map((r) => `| \`${page(r.url)}\` | ${grade(r.summary.performance)} | ${grade(r.summary.accessibility)} | ${grade(r.summary["best-practices"])} | ${grade(r.summary.seo)} |`);
+            fs.writeFileSync(md, [
+              "### 🔦 Lighthouse (advisory)",
+              "",
+              "| Page | Performance | Accessibility | Best practices | SEO |",
+              "|---|---|---|---|---|",
+              ...rows,
+              "",
+              "_One run per page on a CI runner, signed out: compare with earlier runs of this repository, not with PageSpeed. Full reports are in the runtime-gate artifact, under `lighthouse/`._",
+            ].join("\n") + "\n");
+          ' "${out}" "${RG_BASE}" "${RG_REPORT}/lighthouse.md"
+          cat "${RG_REPORT}/lighthouse.md" >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          PAGES: ${{ inputs.lighthouse-pages }}
+          BROWSER: ${{ inputs.browser }}
+          SELF_HOSTED: ${{ runner.environment == 'self-hosted' }}
+          LHCI_VERSION: 0.14.x
+
       - name: Pages to explore first
         id: focus
         if: steps.plan.outputs.explore == 'true'
@@ -754,8 +890,9 @@ jobs:
             const read = (f) => (fs.existsSync(`${process.env.REPORT}/${f}`) ? fs.readFileSync(`${process.env.REPORT}/${f}`, 'utf8') : '');
             const crawl = read('crawl.md') || `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`;
             const explore = read('explore.md') || `_AI explorer not run: ${process.env.EXPLORE_REASON}. Add the \`ai-explore\` label to request one._`;
+            const lighthouse = read('lighthouse.md');
             const marker = '<!-- runtime-gate-report -->';
-            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`].join('\n');
+            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', ...(lighthouse ? [lighthouse, ''] : []), explore, '', `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`].join('\n');
             if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n… truncated, full report in the artifact.`;
             const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, per_page: 100 });
             const existing = comments.find((c) => c.body && c.body.includes(marker));
