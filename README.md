@@ -104,10 +104,14 @@ build instead of building it again: upload the output in the build job, then
 call `lighthouse-ci.yml` from a job that `needs` it, with `artifact-name` (and
 `artifact-path`, where the lighthouserc file's `collect.staticDistDir` points).
 Install and build are skipped, so private packages need no token in that job,
-and the pages audited are the pages that ship:
+and the pages audited are the pages that ship. With `staticDistDir`, give
+`collect.url` as paths (`"/"`, `"/about.html"`) or `localhost` URLs: lhci
+serves the folder on a port of its own and swaps only the port, so a remote
+URL such as a staging host would be audited there, not the artifact.
 
 ```yaml
   build:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       # ... install, test, build ...
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -128,9 +132,12 @@ and the pages audited are the pages that ship:
 ```
 
 Keep Lighthouse out of the `ci-gate` job's `needs` while it is advisory. Keep
-reports private too: `upload.target` should be `filesystem` (the reports go in
-the `lighthouse-results` artifact), never `temporary-public-storage`, which
-publishes each report at a public link.
+reports private too: `upload.target` should be `filesystem` with
+`upload.outputDir` set to `.lighthouseci` (the reports then go in the
+`lighthouse-results` artifact, and the PR comment finds
+`.lighthouseci/manifest.json`; without `outputDir` lhci writes to the
+repository root and the comment is skipped), never
+`temporary-public-storage`, which publishes each report at a public link.
 
 The agent pipeline below (`claude-address-feedback`, `auto-merge-gate`, and
 CodeRabbit Pro as the reviewer leg) deliberately does **not** follow this
