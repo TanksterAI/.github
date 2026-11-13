@@ -70,13 +70,13 @@ on:
           osv-scanner release. Change osv-sha256 with it: the checksum of
           osv-scanner_linux_amd64 in that release's osv-scanner_SHA256SUMS.
         type: string
-        default: 2.5.0
+        default: 2.7.1
       osv-sha256:
         description: >-
           SHA-256 of osv-scanner_linux_amd64 for osv-version. The install
           fails closed when it does not match.
         type: string
-        default: edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
+        default: fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
       osv-scan-args:
         description: osv-scanner arguments, split on whitespace (one per line by convention).
         type: string
