@@ -20,7 +20,8 @@
 #   2. visual (advisory)   screenshots compared with the last default-branch run.
 #   3. lighthouse          performance, accessibility, best practices and SEO
 #      (advisory)          scores for the first pages the crawl reached signed
-#                          out, one run each, in the browser the crawl used.
+#                          out, one run each, in the runner's Chrome or else the
+#                          crawl's Chromium.
 #   4. explore (advisory)  Gemini uses the app like a person, by look and feel,
 #                          for major or framework updates, labelled PRs,
 #                          schedules and manual runs. Free tier; needs the
@@ -263,11 +264,12 @@ on:
           Advisory Lighthouse scores (performance, accessibility, best practices,
           SEO) for the first pages the crawl reached signed out, in the job
           summary and the PR comment, with the full reports in the artifact.
-          Never changes the verdict. Skipped when http-user is set.
+          Never changes the verdict. With http-user, it sends the same HTTP
+          Basic credentials and redacts them from the reports.
         type: boolean
         default: true
       lighthouse-pages:
-        description: How many of the crawled pages Lighthouse audits, one run each.
+        description: How many of the crawled pages Lighthouse audits, one run each; 0 turns Lighthouse off.
         type: number
         default: 3
       comment:
@@ -317,6 +319,9 @@ jobs:
         id: plan
         run: |
           set -euo pipefail
+          # When the job started, near enough, so an advisory step can tell how
+          # much of timeout-minutes is left before it starts.
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
           cd "${RG_WD}"
           # Node version: the repo's own file wins, so CI and local dev agree.
           if [ -n "${NODE_VERSION_FILE}" ] && [ -f "${NODE_VERSION_FILE}" ]; then
@@ -637,127 +642,6 @@ jobs:
           headed: ${{ inputs.headed }}
           baseline-dir: ${{ steps.baseline.outputs.run-id != '' && format('{0}/rg-baseline', runner.temp) || '' }}
 
-      # Lighthouse (advisory) over the first pages the crawl reached signed out
-      # that answered 200 with a page title, so an API's JSON or an error page
-      # is never scored. Its own LTS Node, so the toolkit's or the app's Node
-      # (which may be a release lhci has not met) does not matter; the explorer
-      # after it needs only Node 22 or later.
-      - name: Node for Lighthouse
-        id: lh-node
-        if: inputs.lighthouse && inputs.http-user == '' && steps.crawl.outcome != 'skipped'
-        continue-on-error: true
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: lts/*
-          package-manager-cache: false
-
-      - name: Lighthouse (advisory)
-        if: steps.lh-node.outcome == 'success'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          crawl="${RG_REPORT}/crawl.json"
-          out="${RG_REPORT}/lighthouse"
-          if [ ! -f "${crawl}" ]; then
-            echo "No crawl report, so no pages to audit."
-            exit 0
-          fi
-          mapfile -t urls < <(node -e '
-            const r = require(process.argv[1]);
-            const max = Number(process.argv[2]);
-            const base = new URL(r.url);
-            const seen = new Set();
-            const out = [];
-            for (const p of r.pages || []) {
-              if (p.signedIn || p.status !== 200 || !p.title) continue;
-              let u;
-              try { u = new URL(p.finalUrl || p.url); } catch { continue; }
-              if (u.origin !== base.origin) continue;
-              u.hash = "";
-              if (seen.has(u.href)) continue;
-              seen.add(u.href);
-              out.push(u.href);
-              if (out.length >= max) break;
-            }
-            if (out.length) console.log(out.join("\n"));
-          ' "${crawl}" "${PAGES}")
-          if [ "${#urls[@]}" -eq 0 ]; then
-            echo "The crawl reached no signed-out page with a title, so Lighthouse has nothing to audit."
-            exit 0
-          fi
-
-          # The branded Chrome where the runner has one (GitHub-hosted runners
-          # do), else the Chromium the crawl installed. That Chromium runs
-          # without the sandbox, as Playwright runs it; so does any Chrome on a
-          # self-hosted runner, whose container cannot create the user
-          # namespaces the sandbox needs. The flags are added by a wrapper,
-          # not lhci settings, which they would replace wholesale.
-          chrome="$(command -v google-chrome || command -v google-chrome-stable || true)"
-          nosandbox="${SELF_HOSTED}"
-          if [ -z "${chrome}" ]; then
-            chrome="$(find "${PLAYWRIGHT_BROWSERS_PATH:-${HOME}/.cache/ms-playwright}" -path '*/chromium-*/chrome-linux*/chrome' -type f 2>/dev/null | sort -V | tail -n 1 || true)"
-            nosandbox=true
-          fi
-          if [ -z "${chrome}" ]; then
-            echo "::notice title=Lighthouse skipped::no Chrome or Playwright Chromium on this runner (browser: ${BROWSER})."
-            exit 0
-          fi
-          work="${RUNNER_TEMP}/rg-lighthouse"
-          rm -rf "${work}"
-          mkdir -p "${work}" "${out}"
-          cd "${work}"
-          if [ "${nosandbox}" = "true" ]; then
-            printf '#!/bin/sh\nexec "%s" --no-sandbox --disable-dev-shm-usage "$@"\n' "${chrome}" > "${work}/chrome"
-            chmod 0755 "${work}/chrome"
-            export CHROME_PATH="${work}/chrome"
-          else
-            export CHROME_PATH="${chrome}"
-          fi
-          echo "Lighthouse: ${chrome} on ${#urls[@]} page(s)"
-
-          # Its own config in an empty directory, so a lighthouserc file in the
-          # repository (written for lighthouse-ci.yml) is not picked up here.
-          node -e '
-            const [outDir, ...url] = process.argv.slice(1);
-            const warn = (minScore) => ["warn", { minScore }];
-            require("fs").writeFileSync("lighthouserc.json", JSON.stringify({ ci: {
-              collect: { url, numberOfRuns: 1 },
-              assert: { assertions: {
-                "categories:performance": warn(0.9),
-                "categories:accessibility": warn(0.95),
-                "categories:best-practices": warn(0.9),
-                "categories:seo": warn(0.9),
-              } },
-              upload: { target: "filesystem", outputDir: outDir },
-            } }));
-          ' "${out}" "${urls[@]}"
-          npx --yes "@lhci/cli@${LHCI_VERSION}" autorun
-
-          # shellcheck disable=SC2016 # JavaScript template literals, not shell
-          node -e '
-            const fs = require("fs");
-            const [outDir, base, md] = process.argv.slice(1);
-            const runs = JSON.parse(fs.readFileSync(`${outDir}/manifest.json`, "utf8")).filter((r) => r.isRepresentativeRun);
-            const grade = (s) => (s == null ? "—" : `${Math.round(s * 100) >= 90 ? "🟢" : Math.round(s * 100) >= 50 ? "🟠" : "🔴"} ${Math.round(s * 100)}`);
-            const page = (u) => { const x = new URL(u); return x.origin === base ? (x.pathname + x.search) : u; };
-            const rows = runs.map((r) => `| \`${page(r.url)}\` | ${grade(r.summary.performance)} | ${grade(r.summary.accessibility)} | ${grade(r.summary["best-practices"])} | ${grade(r.summary.seo)} |`);
-            fs.writeFileSync(md, [
-              "### 🔦 Lighthouse (advisory)",
-              "",
-              "| Page | Performance | Accessibility | Best practices | SEO |",
-              "|---|---|---|---|---|",
-              ...rows,
-              "",
-              "_One run per page on a CI runner, signed out: compare with earlier runs of this repository, not with PageSpeed. Full reports are in the runtime-gate artifact, under `lighthouse/`._",
-            ].join("\n") + "\n");
-          ' "${out}" "${RG_BASE}" "${RG_REPORT}/lighthouse.md"
-          cat "${RG_REPORT}/lighthouse.md" >> "${GITHUB_STEP_SUMMARY}"
-        env:
-          PAGES: ${{ inputs.lighthouse-pages }}
-          BROWSER: ${{ inputs.browser }}
-          SELF_HOSTED: ${{ runner.environment == 'self-hosted' }}
-          LHCI_VERSION: 0.14.x
-
       - name: Pages to explore first
         id: focus
         if: steps.plan.outputs.explore == 'true'
@@ -804,6 +688,198 @@ jobs:
           explore-hints-file: ${{ inputs.working-directory }}/.github/runtime-gate.md
           explore-focus: ${{ steps.focus.outputs.pages }}
           explore-context: ${{ github.event.pull_request.title && format('Change under test - {0}', github.event.pull_request.title) || '' }}
+
+      # Lighthouse (advisory) over the first pages the crawl reached signed out
+      # that answered 200 with a page title, so an API's JSON or an error page
+      # is never scored. After the explorer, because its setup-node puts an LTS
+      # Node first on PATH for the rest of the job: nothing after it runs Node
+      # from the app or the toolkit, so neither sees the switch, and lhci never
+      # meets a Node release it has not been tested on.
+      - name: Node for Lighthouse
+        id: lh-node
+        if: inputs.lighthouse && inputs.lighthouse-pages > 0 && steps.crawl.outcome != 'skipped'
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+          package-manager-cache: false
+
+      # Bounded so it can never take the job past timeout-minutes and turn a
+      # passing gate red: lhci gets at most 8 minutes, and less when the job
+      # has less left (4 kept back for the steps after it), so a slow page or
+      # a long crawl still leaves a note in the comment. The step's own 10 is
+      # a backstop.
+      - name: Lighthouse (advisory)
+        if: steps.lh-node.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          crawl="${RG_REPORT}/crawl.json"
+          out="${RG_REPORT}/lighthouse"
+          md="${RG_REPORT}/lighthouse.md"
+          note() {
+            printf '### 🔦 Lighthouse (advisory)\n\n_%s_\n' "$1" > "${md}"
+            cat "${md}" >> "${GITHUB_STEP_SUMMARY}"
+          }
+          if [ ! -f "${crawl}" ]; then
+            echo "No crawl report, so no pages to audit."
+            exit 0
+          fi
+          mapfile -t urls < <(node -e '
+            const r = require(process.argv[1]);
+            const max = Number(process.argv[2]);
+            const base = new URL(r.url);
+            const seen = new Set();
+            const out = [];
+            for (const p of r.pages || []) {
+              if (out.length >= max) break;
+              if (p.signedIn || p.status !== 200 || !p.title) continue;
+              let u;
+              try { u = new URL(p.finalUrl || p.url); } catch { continue; }
+              if (u.origin !== base.origin) continue;
+              u.hash = "";
+              if (seen.has(u.href)) continue;
+              seen.add(u.href);
+              out.push(u.href);
+            }
+            if (out.length) console.log(out.join("\n"));
+          ' "${crawl}" "${PAGES}")
+          if [ "${#urls[@]}" -eq 0 ]; then
+            note "Not run: the crawl reached no signed-out page that answered 200 with a title."
+            exit 0
+          fi
+          budget=480
+          if [ -n "${STARTED}" ]; then
+            left=$(( JOB_MINUTES * 60 - ($(date +%s) - STARTED) - 240 ))
+            if [ "${left}" -lt "${budget}" ]; then budget="${left}"; fi
+          fi
+          if [ "${budget}" -lt 90 ]; then
+            note "Not run: too little of the job's ${JOB_MINUTES}-minute timeout was left after the crawl."
+            exit 0
+          fi
+
+          # The branded Chrome where the runner has one (GitHub-hosted runners
+          # do), else the Chromium the crawl installed. That Chromium runs
+          # without the sandbox, as Playwright runs it; so does any Chrome on a
+          # self-hosted runner, whose container cannot create the user
+          # namespaces the sandbox needs. The flags are added by a wrapper,
+          # not lhci settings, which they would replace wholesale.
+          chrome="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          nosandbox="${SELF_HOSTED}"
+          if [ -z "${chrome}" ]; then
+            chrome="$(find "${PLAYWRIGHT_BROWSERS_PATH:-${HOME}/.cache/ms-playwright}" -path '*/chromium-*/chrome-linux*/chrome' -type f 2>/dev/null | sort -V | tail -n 1 || true)"
+            nosandbox=true
+          fi
+          if [ -z "${chrome}" ]; then
+            echo "::notice title=Lighthouse skipped::no Chrome or Playwright Chromium on this runner (browser: ${BROWSER})."
+            note "Not run: no Chrome or Playwright Chromium on this runner."
+            exit 0
+          fi
+          work="${RUNNER_TEMP}/rg-lighthouse"
+          rm -rf "${work}" "${out}"
+          mkdir -p "${work}" "${out}"
+          cd "${work}"
+          if [ "${nosandbox}" = "true" ]; then
+            printf '#!/bin/sh\nexec "%s" --no-sandbox --disable-dev-shm-usage "$@"\n' "${chrome}" > "${work}/chrome"
+            chmod 0755 "${work}/chrome"
+            export CHROME_PATH="${work}/chrome"
+          else
+            export CHROME_PATH="${chrome}"
+          fi
+
+          # HTTP Basic, as the crawl signs in with it. Lighthouse sends extra
+          # headers with every request the page makes, which is one reason
+          # http-password must be the dummy CI value its input asks for. The
+          # reports record the header in their settings, so it is masked in the
+          # log and redacted from every report before the artifact is uploaded;
+          # if any copy survives, the reports are deleted instead.
+          LH_AUTH=""
+          if [ -n "${HTTP_USER}" ]; then
+            LH_AUTH="$(printf '%s:%s' "${HTTP_USER}" "${HTTP_PASSWORD}" | base64 -w0)"
+            echo "::add-mask::${LH_AUTH}"
+          fi
+          export LH_AUTH
+          redact() {
+            rm -f "${work}/lighthouserc.json"
+            [ -n "${LH_AUTH}" ] && [ -d "${out}" ] || return 0
+            { grep -rlF -- "${LH_AUTH}" "${out}" || true; } | while IFS= read -r f; do
+              sed -i "s#${LH_AUTH}#REDACTED#g" "${f}"
+            done
+            if grep -rqF -- "${LH_AUTH}" "${out}"; then
+              rm -rf "${out}"
+              echo "::warning title=Lighthouse reports removed::the Basic-auth header could not be redacted from them."
+            fi
+          }
+          trap redact EXIT
+          echo "Lighthouse: ${chrome} on ${#urls[@]} page(s)${HTTP_USER:+, with HTTP Basic}"
+
+          # Its own config in an empty directory, so a lighthouserc file in the
+          # repository (written for lighthouse-ci.yml) is not picked up here.
+          # shellcheck disable=SC2016 # JavaScript template literal, not shell
+          node -e '
+            const [outDir, ...url] = process.argv.slice(1);
+            const auth = process.env.LH_AUTH;
+            const warn = (minScore) => ["warn", { minScore }];
+            require("fs").writeFileSync("lighthouserc.json", JSON.stringify({ ci: {
+              collect: { url, numberOfRuns: 1, ...(auth ? { settings: { extraHeaders: { Authorization: `Basic ${auth}` } } } : {}) },
+              assert: { assertions: {
+                "categories:performance": warn(0.9),
+                "categories:accessibility": warn(0.95),
+                "categories:best-practices": warn(0.9),
+                "categories:seo": warn(0.9),
+              } },
+              upload: { target: "filesystem", outputDir: outDir },
+            } }));
+          ' "${out}" "${urls[@]}"
+          if ! timeout "${budget}" npx --yes "@lhci/cli@${LHCI_VERSION}" autorun; then
+            note "Lighthouse did not complete (failed, or ran out of its $(((budget + 59) / 60))-minute budget); see the Lighthouse step in the run log."
+            exit 1
+          fi
+          redact
+
+          # Green from 90 (95 for accessibility, the bar the assertions use).
+          # Paths are escaped for the table: | would split a cell and ` would
+          # end the code span.
+          # shellcheck disable=SC2016 # JavaScript template literals, not shell
+          if ! node -e '
+            const fs = require("fs");
+            const [outDir, base, md] = process.argv.slice(1);
+            const runs = JSON.parse(fs.readFileSync(`${outDir}/manifest.json`, "utf8")).filter((r) => r.isRepresentativeRun);
+            const grade = (s, good = 90) => {
+              if (s == null) return "—";
+              const n = Math.round(s * 100);
+              return `${n >= good ? "🟢" : n >= 50 ? "🟠" : "🔴"} ${n}`;
+            };
+            const page = (u) => {
+              const x = new URL(u);
+              return (x.origin === base ? x.pathname + x.search : u).replace(/\|/g, "\\|").replace(/`/g, "%60");
+            };
+            const rows = runs.map((r) => `| \`${page(r.url)}\` | ${grade(r.summary.performance)} | ${grade(r.summary.accessibility, 95)} | ${grade(r.summary["best-practices"])} | ${grade(r.summary.seo)} |`);
+            fs.writeFileSync(md, [
+              "### 🔦 Lighthouse (advisory)",
+              "",
+              "| Page | Performance | Accessibility | Best practices | SEO |",
+              "|---|---|---|---|---|",
+              ...rows,
+              "",
+              "_One run per page on a CI runner, signed out: compare with earlier runs of this repository, not with PageSpeed. Full reports are in the runtime-gate artifact, under `lighthouse/`._",
+            ].join("\n") + "\n");
+          ' "${out}" "${RG_BASE}" "${md}"; then
+            note "Lighthouse ran but its scores could not be read; see the Lighthouse step in the run log."
+            exit 1
+          fi
+          cat "${md}" >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          PAGES: ${{ inputs.lighthouse-pages }}
+          BROWSER: ${{ inputs.browser }}
+          SELF_HOSTED: ${{ runner.environment == 'self-hosted' }}
+          HTTP_USER: ${{ inputs.http-user }}
+          HTTP_PASSWORD: ${{ inputs.http-password }}
+          STARTED: ${{ steps.plan.outputs.started }}
+          JOB_MINUTES: ${{ inputs.timeout-minutes }}
+          LHCI_VERSION: 0.14.x
 
       - name: Collect logs
         if: always()
