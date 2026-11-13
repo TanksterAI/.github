@@ -51,7 +51,7 @@ needs to be insulated from that.
 | `node-ci.yml` | Node / TypeScript | npm or pnpm, single job, `.nvmrc` as the version source of truth |
 | `rust-ci.yml` | Rust | fmt, clippy `-D warnings`, test, release build (not on PRs unless `release-on-pr`), and the no-panics-in-production gate |
 | `security.yml` | any | osv-scanner + gitleaks in one job, both blocking; the advisory ecosystem audit runs weekly (every run if `audit-strict`) |
-| `lighthouse-ci.yml` | Node / web frontends | `lhci autorun` against a locally built app, plus a sticky PR comment with the score table; advisory by default |
+| `lighthouse-ci.yml` | Node / web frontends | `lhci autorun` against a locally built app or the caller's own build artifact, plus a sticky PR comment with the score table; advisory by default |
 | `runtime-gate.yml` | web apps (any stack) | boots the app (Dockerfile, command or static), crawls it in a real browser and **fails on runtime errors**: exceptions, console errors, hydration errors, failed requests, 4xx/5xx, blank pages; plus advisory screenshot diffs, advisory Lighthouse scores for the pages it reached, and an advisory Gemini explorer that uses the app like a person. See `docs/runtime-gate.md` |
 | `lockfile.yml` | Node / TypeScript | `workflow_dispatch` lockfile regeneration that proves the result before committing |
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
@@ -98,6 +98,49 @@ this repository for a starting point. A repo that wants "advisory on PRs,
 blocking on protected branches" rather than one fixed value can compute
 `strict` from the triggering event instead of hardcoding it:
 `strict: ${{ github.event_name != 'pull_request' }}`.
+
+A repo whose CI already builds a static site can have Lighthouse audit that
+build instead of building it again: upload the output in the build job, then
+call `lighthouse-ci.yml` from a job that `needs` it, with `artifact-name` (and
+`artifact-path`, where the lighthouserc file's `collect.staticDistDir` points).
+Install and build are skipped, so private packages need no token in that job,
+and the pages audited are the pages that ship. With `staticDistDir`, give
+`collect.url` as paths (`"/"`, `"/about.html"`) or `http://localhost` URLs:
+lhci serves the folder over plain HTTP on a port of its own and swaps only the
+port, keeping the host and scheme, so a remote URL such as a staging host would
+be audited there, not the artifact, and an `https://localhost` URL would fail.
+`artifact-name` and `artifact-path` arrived in `v1` on 13 November 2026; a
+caller pinned to an older SHA of this workflow has to move its pin first.
+
+```yaml
+  build:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      # ... install, test, build ...
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site
+          path: dist
+          retention-days: 1
+
+  lighthouse:
+    needs: [build]
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: TanksterAI/.github/.github/workflows/lighthouse-ci.yml@v1
+    with:
+      artifact-name: site
+      artifact-path: dist
+```
+
+Keep Lighthouse out of the `ci-gate` job's `needs` while it is advisory. Keep
+reports private too: `upload.target` should be `filesystem` with
+`upload.outputDir` set to `.lighthouseci` (the reports then go in the
+`lighthouse-results` artifact, and the PR comment finds
+`.lighthouseci/manifest.json`; without `outputDir` lhci writes to the
+repository root and the comment is skipped), never
+`temporary-public-storage`, which publishes each report at a public link.
 
 The agent pipeline below (`claude-address-feedback`, `auto-merge-gate`, and
 CodeRabbit Pro as the reviewer leg) deliberately does **not** follow this
