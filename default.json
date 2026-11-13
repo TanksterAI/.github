@@ -26,6 +26,26 @@
     "prCreation": "immediate",
     "minimumReleaseAge": null
   },
+  "customManagers": [
+    {
+      "description": "security.yml installs google/osv-scanner as a release binary pinned by its `osv-version` input, which the github-actions manager cannot see. This proposes new releases; self-check fails the pull request until the matching SHA-256 input is updated too, so a bump cannot merge unverified.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/security\\.yml$/"],
+      "matchStrings": ["\\n {6}osv-version:\\n(?: {8}.*\\n)*? {8}default: (?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"],
+      "depNameTemplate": "google/osv-scanner",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "description": "security.yml installs gitleaks/gitleaks as a release binary pinned by its `gitleaks-version` input, which the github-actions manager cannot see. This proposes new releases; self-check fails the pull request until the matching SHA-256 input is updated too, so a bump cannot merge unverified.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/security\\.yml$/"],
+      "matchStrings": ["\\n {6}gitleaks-version:\\n(?: {8}.*\\n)*? {8}default: (?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"],
+      "depNameTemplate": "gitleaks/gitleaks",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ],
   "packageRules": [
     {
       "description": "CI-MINUTE BUDGET (Oct 2026). Every Renovate PR runs full CI, and so does its merge, so one PR per package was about 450 PRs a month across the estate. All non-major updates now arrive together, in a window on the 1st-3rd of the month (wide enough that automerge PRs pass CI and merge inside it, because updateNotScheduled is false), in two PRs per repository split by merge policy: this one (reviewed) and 'non-major (automerge)'. Docker digest updates ride here too. Security fixes are not affected: vulnerabilityAlerts ignores schedule and grouping and opens at once.",

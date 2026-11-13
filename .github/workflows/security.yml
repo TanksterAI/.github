@@ -25,11 +25,12 @@
 # runs third-party code (pip install), which must not find it in
 # .git/config. Actions are pinned to commit SHAs.
 #
-# DOCKER-FREE, so it can run on the light lane (Cloud Run, no Docker, no
-# sudo). osv-scanner is the release binary rather than google's
-# osv-scanner-action, which is a Docker action; both run the same
-# osv-scanner with the same arguments. gitleaks and osv-scanner go into
-# $RUNNER_TEMP/bin, checked against pinned SHA-256 sums, without sudo.
+# DOCKER-FREE, so it can run on the light lane (Cloud Run, no Docker).
+# osv-scanner is the release binary rather than google's
+# osv-scanner-action, which is a Docker action whose image also carried Go;
+# Go is installed here when the tree has a go.mod, for osv-scanner's call
+# analysis. gitleaks and osv-scanner go into $RUNNER_TEMP/bin, checked
+# against pinned SHA-256 sums, and need no root.
 name: security
 
 on:
@@ -53,10 +54,12 @@ on:
           Run on the Cloud Run light runner, which has no Docker, once the
           organisation opens the light lane (CI_LIGHT_RUNNER is
           tankster-light). Until then, or when runs-on is set, it changes
-          nothing. Nothing in this workflow needs Docker or sudo, and it
-          uploads nothing, so it stays far below the 64 MiB a light job may
-          send; false keeps it off the lane anyway. If a scan does fail
-          there for want of Docker, the dispatcher re-runs it on Cloud Build.
+          nothing. Nothing in this workflow needs Docker, and it uploads
+          nothing, so it stays far below the 64 MiB a light job may send.
+          The light image has no C/C++ toolchain, so the python audit's
+          `pip install -e .` fails there for a package that builds native
+          code from source. The audit is advisory, so that is only a
+          warning; with audit-strict, pass false for such a package.
         type: boolean
         default: true
       osv:
@@ -69,10 +72,13 @@ on:
         type: string
         default: 2.5.0
       osv-sha256:
+        description: >-
+          SHA-256 of osv-scanner_linux_amd64 for osv-version. The install
+          fails closed when it does not match.
         type: string
         default: edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
       osv-scan-args:
-        description: Newline-separated osv-scanner arguments.
+        description: osv-scanner arguments, split on whitespace (one per line by convention).
         type: string
         default: |
           --recursive
@@ -87,6 +93,9 @@ on:
         type: string
         default: 8.30.1
       gitleaks-sha256:
+        description: >-
+          SHA-256 of the gitleaks tarball for gitleaks-version. The install
+          fails closed when it does not match.
         type: string
         default: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
       gitleaks-history:
@@ -150,8 +159,8 @@ jobs:
       # The release binary, not google/osv-scanner-action (a Docker action,
       # so never on the light lane) nor its reusable workflow (that uploads
       # SARIF to code scanning, which needs GitHub Code Security on private
-      # repos). Same osv-scanner, same arguments: it scans and exits
-      # non-zero on findings. continue-on-error so gitleaks still runs; the
+      # repos). The same osv-scanner build: it scans and exits non-zero on
+      # findings. continue-on-error so gitleaks still runs; the
       # verdict step below fails the job on its outcome, and an install
       # that failed counts as a failure there too.
       - name: Install osv-scanner
@@ -164,21 +173,38 @@ jobs:
           curl -fsSL --retry 3 \
             "https://github.com/google/osv-scanner/releases/download/v${VERSION}/osv-scanner_linux_amd64" \
             -o "${RUNNER_TEMP}/bin/osv-scanner"
-          echo "${SHA256}  ${RUNNER_TEMP}/bin/osv-scanner" | sha256sum -c -
+          if ! echo "${SHA256}  ${RUNNER_TEMP}/bin/osv-scanner" | sha256sum -c -; then
+            echo "::error title=osv-scanner checksum::osv-scanner_linux_amd64 v${VERSION} does not match osv-sha256; set osv-sha256 to its line in that release's osv-scanner_SHA256SUMS"
+            exit 1
+          fi
           chmod 0755 "${RUNNER_TEMP}/bin/osv-scanner"
           "${RUNNER_TEMP}/bin/osv-scanner" --version
         env:
           VERSION: ${{ inputs.osv-version }}
           SHA256: ${{ inputs.osv-sha256 }}
 
+      # osv-scanner analyses which Go vulnerabilities the code calls, and
+      # without `go` it counts every one as called, so uncalled ones would
+      # fail the scan. The action's image was golang:alpine; the light and
+      # Cloud Build images have no Go. Nothing is cached, so nothing is
+      # uploaded.
+      - name: Go, for osv-scanner's call analysis
+        if: inputs.osv && steps.osv-install.outcome == 'success' && hashFiles('**/go.mod') != ''
+        continue-on-error: true
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
       - name: Vulnerable dependencies (osv-scanner)
         id: osv
         if: inputs.osv && steps.osv-install.outcome == 'success'
         continue-on-error: true
-        # As the action's entrypoint (exit_code_redirect.sh in osv-scanner
-        # v2.5.0) did: the arguments split on any whitespace, and exit 128
-        # (no lockfiles found) is a pass with a warning unless the arguments
-        # say --allow-no-lockfiles=false.
+        # As upstream's entrypoint for the action (exit_code_redirect.sh in
+        # osv-scanner v2.5.0) intends: the arguments split on any whitespace
+        # (without its glob expansion), and exit 128 (no lockfiles found) is
+        # a pass with a warning unless the arguments say
+        # --allow-no-lockfiles=false.
         run: |
           set -euo pipefail
           mapfile -t args < <(printf '%s' "${SCAN_ARGS}" | tr -s '[:space:]' '\n' | sed '/^$/d')
@@ -196,6 +222,8 @@ jobs:
           exit "${status}"
         env:
           SCAN_ARGS: ${{ inputs.osv-scan-args }}
+          # As the action set it: a go.mod asking for a newer Go fetches it.
+          GOTOOLCHAIN: auto
 
       - name: Install gitleaks
         id: gitleaks-install
@@ -205,7 +233,10 @@ jobs:
           set -euo pipefail
           url="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
           curl -fsSL --retry 3 "$url" -o "${RUNNER_TEMP}/gitleaks.tar.gz"
-          echo "${SHA256}  ${RUNNER_TEMP}/gitleaks.tar.gz" | sha256sum -c -
+          if ! echo "${SHA256}  ${RUNNER_TEMP}/gitleaks.tar.gz" | sha256sum -c -; then
+            echo "::error title=gitleaks checksum::gitleaks v${VERSION} does not match gitleaks-sha256; set gitleaks-sha256 to its line in that release's checksums"
+            exit 1
+          fi
           mkdir -p "${RUNNER_TEMP}/bin"
           tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}/bin" gitleaks
           "${RUNNER_TEMP}/bin/gitleaks" version
