@@ -998,9 +998,6 @@ jobs:
           "$bin" -version
           # actionlint skips shellcheck without a word when it is not on PATH,
           # so a green run would look as if the run: blocks had been checked.
-          if [ "${SHELLCHECK}" = "true" ]; then
-            :
-          fi
           if [ "${SHELLCHECK}" = "true" ] && ! command -v shellcheck >/dev/null; then
             echo "::warning title=shellcheck missing::shellcheck is missing on this runner (${RUNNER_NAME:-unknown}), so actionlint did not check the run: blocks with it. Runners that have shellcheck check them."
           fi
