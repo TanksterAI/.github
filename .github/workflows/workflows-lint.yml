@@ -226,7 +226,7 @@ jobs:
           # script (npm run ...), a variable or a library (testcontainers, say) is not
           # seen, and nor is a runs-on that takes its label from a variable. Heredoc
           # bodies are skipped unless a shell reads them. The dispatcher's re-run on
-          # TANKSTER_LIGHT_NO_DOCKER and the socket errors is the fallback for what
+          # the Docker shim's marker and the socket errors is the fallback for what
           # this cannot see. Nor does it check how much a job uploads: the runner
           # stops a job that sends more than its egress limit, and the dispatcher
           # re-runs it on Cloud Build.
