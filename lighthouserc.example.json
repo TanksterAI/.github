@@ -17,7 +17,9 @@
       }
     },
     "upload": {
-      "target": "temporary-public-storage"
+      "//": "filesystem keeps the reports in the workflow's lighthouse-results artifact. Never temporary-public-storage for a private repository: it publishes every audited page's report, staging pages included, at a public link.",
+      "target": "filesystem",
+      "outputDir": ".lighthouseci"
     }
   }
 }
