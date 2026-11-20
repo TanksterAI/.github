@@ -135,12 +135,15 @@ caller pinned to an older SHA of this workflow has to move its pin first.
 ```
 
 Keep Lighthouse out of the `ci-gate` job's `needs` while it is advisory. Keep
-reports private too: `upload.target` should be `filesystem` with
+reports off public links too: `upload.target` should be `filesystem` with
 `upload.outputDir` set to `.lighthouseci` (the reports then go in the
 `lighthouse-results` artifact, and the PR comment finds
 `.lighthouseci/manifest.json`; without `outputDir` lhci writes to the
 repository root and the comment is skipped), never
 `temporary-public-storage`, which publishes each report at a public link.
+The artifact is as visible as the repository: in a public repository any
+signed-in GitHub user can download it, so don't audit pages that must stay
+unpublished, such as a staging build, from one.
 
 The agent pipeline below (`claude-address-feedback`, `auto-merge-gate`, and
 CodeRabbit Pro as the reviewer leg) deliberately does **not** follow this
