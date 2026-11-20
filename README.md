@@ -109,7 +109,7 @@ and the pages audited are the pages that ship. With `staticDistDir`, give
 lhci serves the folder over plain HTTP on a port of its own and swaps only the
 port, keeping the host and scheme, so a remote URL such as a staging host would
 be audited there, not the artifact, and an `https://localhost` URL would fail.
-`artifact-name` and `artifact-path` arrived in `v1` on 13 November 2026; a
+`artifact-name` and `artifact-path` arrived in `v1` on 20 November 2026; a
 caller pinned to an older SHA of this workflow has to move its pin first.
 
 ```yaml
